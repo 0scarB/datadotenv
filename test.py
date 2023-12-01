@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 import unittest
 from unittest import TestCase
 
@@ -8,7 +9,7 @@ from src import datadotenv, iter_vars_from_dotenv_chars, Var
 
 class TestDatadotenv(TestCase):
 
-    def test_instantiates_dataclass_primative_types(self):
+    def test_instantiates_dataclass_with_primitive_types(self):
         
         @dataclass(frozen=True)
         class MyDotenv:
@@ -19,6 +20,7 @@ class TestDatadotenv(TestCase):
             bool_var4: bool
             int_var: int
             float_var: float
+            unset_var: None
 
         spec = datadotenv(MyDotenv)
 
@@ -31,6 +33,7 @@ class TestDatadotenv(TestCase):
                 'BOOL_VAR4=false',
                 'INT_VAR=42',
                 'FLOAT_VAR=3.14',
+                'UNSET_VAR=',
             ])),
             MyDotenv(
                 str_var="foo",
@@ -40,10 +43,29 @@ class TestDatadotenv(TestCase):
                 bool_var4=False,
                 int_var=42,
                 float_var=3.14,
+                unset_var=None,
             )
         )
 
+    def test_instantiates_dataclass_with_composite_types(self):
 
+        @dataclass(frozen=True)
+        class MyDotenv:
+            literal_var1: Literal["foo", 42]
+            literal_var2: Literal["foo", 42]
+
+        spec = datadotenv(MyDotenv)
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'LITERAL_VAR1="foo"',
+                'LITERAL_VAR2=42',
+            ])),
+            MyDotenv(
+                literal_var1="foo",
+                literal_var2=42,
+            )
+        )
 
 class TestIterNameValuesFromChars(TestCase):
 
@@ -170,20 +192,24 @@ class TestIterNameValuesFromChars(TestCase):
         it = iter_vars_from_dotenv_chars(r"KEY='value with escaped quote \''")
         self.assertEqual(next(it), Var("KEY", "value with escaped quote '")) 
 
-    def test_parses_empty_values(self):
+    def test_parses_unset_values(self):
         it = iter_vars_from_dotenv_chars("KEY=")
-        self.assertEqual(next(it), Var("KEY", ""))
+        self.assertEqual(next(it), Var("KEY", None))
         
         it = iter_vars_from_dotenv_chars("KEY= ")
-        self.assertEqual(next(it), Var("KEY", ""))
+        self.assertEqual(next(it), Var("KEY", None))
         
         it = iter_vars_from_dotenv_chars("KEY=\t")
-        self.assertEqual(next(it), Var("KEY", ""))
+        self.assertEqual(next(it), Var("KEY", None))
         
         it = iter_vars_from_dotenv_chars("KEY=\n")
-        self.assertEqual(next(it), Var("KEY", ""))
+        self.assertEqual(next(it), Var("KEY", None))
         
         it = iter_vars_from_dotenv_chars("KEY=\t\n")
+        self.assertEqual(next(it), Var("KEY", None))
+
+    def test_parses_empty_strings(self):
+        it = iter_vars_from_dotenv_chars('KEY=""')
         self.assertEqual(next(it), Var("KEY", ""))
 
     def test_parses_blank_lines_and_empty_string(self):

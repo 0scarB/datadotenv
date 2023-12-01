@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+import types
+import typing
 from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Protocol, Type, TypeAlias, TypeVar
 
 
@@ -21,67 +23,122 @@ def datadotenv(
 ) -> _Spec[_TDataclass]:
     _var_specs: list[_VarSpec] = []
     for field in dataclasses.fields(datacls):
-        if field.type is str or field.type == "str":
-            _var_specs.append(_VarSpecSingleton(
-                dataclass_field_name=field.name,
-                validate_and_convert=lambda var: var.value,
-            ))
-        elif field.type is bool or field.type == "bool":
-            _var_specs.append(_VarSpecSingleton(
-                dataclass_field_name=field.name,
-                validate_and_convert=_validate_and_convert_bool,
-            ))
-        elif field.type is int or field.type == "int":
-            _var_specs.append(_VarSpecSingleton(
-                dataclass_field_name=field.name,
-                validate_and_convert=_validate_and_convert_int,
-            ))
-        elif field.type is float or field.type == "float":
-            _var_specs.append(_VarSpecSingleton(
-                dataclass_field_name=field.name,
-                validate_and_convert=_validate_and_convert_float,
-            ))
-        else:
-            raise DatadotenvNotImplementedError(
-                f"No validation and type conversion implemented for '{field.type}'"
+        _var_specs.append(_VarSpecSingleton(
+            dataclass_field_name=field.name,
+            validate_and_convert=_choose_validator_and_converter(
+                field.name,
+                field.type
             )
-    
+        ))
+
     return _Spec(datacls, _var_specs)
 
 
+def _choose_validator_and_converter(
+        dataclass_field_name: str,
+        type_: Any,
+) -> Callable[[Var], Any]:
+    if type(type_) is str:
+        type_ = eval(type_)
+
+    if type_ is str:
+        return _validate_and_convert_str
+    elif type_ is bool:
+        return _validate_and_convert_bool
+    elif type_ is int:
+        return _validate_and_convert_int
+    elif type_ is float:
+        return _validate_and_convert_float
+    elif isinstance(type_, types.NoneType):
+        return _validate_and_convert_unset
+    elif getattr(type_, "__name__") == "Literal":
+        return _create_validate_and_convert_literal(dataclass_field_name, type_)
+    else:
+        raise DatadotenvNotImplementedError(
+            f"No handling for type of dataclass field '{dataclass_field_name}: {type_.__name__}'!"
+        )
+
+
+def _validate_and_convert_str(env_var: Var) -> str:
+    if env_var.value is None:
+        raise DatadotenvUnsetError(
+            f"Dotenv variable '{env_var.name}' was expected to be set!"
+        )
+
+    return env_var.value
+
+
 def _validate_and_convert_bool(env_var: Var) -> bool:
-    if env_var.value == "true" or env_var.value == "True":
+    str_value = _validate_and_convert_str(env_var)
+    if str_value == "true" or str_value == "True":
         return True
-    elif env_var.value == "false" or env_var.value == "False":
+    elif str_value == "false" or str_value == "False":
         return False
 
-    raise DatadotenvCannotConvert(
-        f"Cannot convert dotenv variable {env_var.name}='{env_var.value}' to expected type 'bool'!"
+    raise DatadotenvConversionError(
+        f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'bool'!"
     )
 
 
 def _validate_and_convert_int(env_var: Var) -> bool:
+    str_value = _validate_and_convert_str(env_var)
     try:
-        return int(env_var.value)
+        return int(str_value)
     except ValueError:
-        raise DatadotenvCannotConvert(
-            f"Cannot convert dotenv variable {env_var.name}='{env_var.value}' to expected type 'int'!"
+        raise DatadotenvConversionError(
+            f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'int'!"
         )
 
 
 def _validate_and_convert_float(env_var: Var) -> bool:
+    str_value = _validate_and_convert_str(env_var)
     try:
-        return float(env_var.value)
+        return float(str_value)
     except ValueError:
-        raise DatadotenvCannotConvert(
-            f"Cannot convert dotenv variable {env_var.name}='{env_var.value}' to expected type 'float'!"
+        raise DatadotenvConversionError(
+            f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'float'!"
         )
+
+
+def _validate_and_convert_unset(env_var: Var) -> None:
+    if env_var.value is None:
+        return None
+
+    raise DatadotenvConversionError(
+        f"Expected dotenv varibale '{env_var.name}' to be unset, not '{env_var.value}'!"
+    )
+
+
+def _create_validate_and_convert_literal(
+        dataclass_field_name: str, 
+        literal: _T
+) -> Callable[[Var], _T]:
+    
+    def validate_and_convert(env_var: Var) -> _T:
+        options = typing.get_args(literal)
+        for option in options:
+            f = _choose_validator_and_converter(dataclass_field_name, type(option))
+            try:
+                if option == f(env_var):
+                    return option
+            except DatadotenvNotImplementedError as err:
+                raise err
+            except DatadotenvError:
+                pass
+        
+        options_str = ", ".join(f"'{option}'" for option in options)
+        raise DatadotenvConversionError(
+            f"Expected dotenv variable '{env_var.name}' to be one of {options_str}, not '{env_var.value}'!"
+        )
+
+    return validate_and_convert
+
 
 
 @dataclass
 class Var:
     name: str
-    value: str
+    value: str | None
 
 
 @dataclass
@@ -157,18 +214,34 @@ class _Spec(Generic[_TDataclass]):
             chars: Iterable[str]
     ) -> _TDataclass:
         kwargs: dict[str, Any] = {}
+        unhandled_dataclass_fields = {
+            var_spec.dataclass_field_name 
+            for var_spec in self._var_specs
+        }
         for var in iter_vars_from_dotenv_chars(chars):
             var_spec = self._discover_var_spec(self._var_specs, var.name)
             if isinstance(var_spec, _VarSpecSingleton):
                 kwargs[var_spec.dataclass_field_name] = var_spec.validate_and_convert(
                     var,
                 )
+                try:
+                    unhandled_dataclass_fields.remove(var_spec.dataclass_field_name)
+                except KeyError:
+                    raise DatadotenvDuplicateVariableError(
+                        f"Dotenv has duplicate variable '{var.name}'!"
+                    )
             elif isinstance(var_spec, _VarSpecAccumulator):
                 raise DatadotenvNotImplementedError
             else:
                 raise RuntimeError(
                     f"Unhandled var_spec type '{type(var_spec).__name__}' with value {var_spec}!"
                 )
+
+        if unhandled_dataclass_fields:
+            missing_variables = ", ".join(f"'{field.upper()}'" for field in unhandled_dataclass_fields)
+            raise DatadotenvMissingVariableError(
+                f"Dotenv is missing the variables: {missing_variables}!"
+            )
         
         return self._datacls(**kwargs)
 
@@ -261,7 +334,7 @@ def _iter_name_values_from_chars_core(
         elif state == _PARSER_STATE_BEFORE_VAL:
             # Allow empty values
             if char == "\n" or char == "\r" or char == "\f":
-                yield Var("".join(name_chars), "")
+                yield Var("".join(name_chars), None)
                 name_chars.clear()
                 state = _PARSER_STATE_BEFORE_NAME
             elif char == '"':
@@ -380,7 +453,7 @@ def _iter_name_values_from_chars_core(
         yield Var("".join(name_chars), "".join(val_chars))
     # Allow empty values
     elif state == _PARSER_STATE_BEFORE_VAL:
-        yield Var("".join(name_chars), "")
+        yield Var("".join(name_chars), None)
     elif state != _PARSER_STATE_BEFORE_NAME:
         raise DatadotenvParseError(
             "Input ended with unterminated name or value!"
@@ -403,7 +476,7 @@ class DatadotenvParseError(DatadotenvValueError):
     pass
 
 
-class DatadotenvCasingError(DatadotenvError):
+class DatadotenvCasingError(DatadotenvError, ValueError):
     pass
 
 
@@ -411,7 +484,19 @@ class DatadotenvNotInDataclassError(DatadotenvError, AttributeError):
     pass
 
 
-class DatadotenvCannotConvert(DatadotenvError, ValueError):
+class DatadotenvMissingVariableError(DatadotenvError, ValueError):
+    pass
+
+
+class DatadotenvDuplicateVariableError(DatadotenvError, ValueError):
+    pass
+
+
+class DatadotenvUnsetError(DatadotenvError, ValueError):
+    pass
+
+
+class DatadotenvConversionError(DatadotenvError, ValueError):
     pass
 
 
