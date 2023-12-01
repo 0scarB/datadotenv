@@ -1,161 +1,202 @@
+from dataclasses import dataclass
 import unittest
 from unittest import TestCase
 
 
-from src import iter_key_values_from_chars
+from src import datadotenv, iter_vars_from_dotenv_chars, Var
 
 
-class TestIterKeyValuesFromChars(TestCase):
+class TestDatadotenv(TestCase):
+
+    def test_instantiates_dataclass_primative_types(self):
+        
+        @dataclass(frozen=True)
+        class MyDotenv:
+            str_var: str
+            bool_var1: bool
+            bool_var2: bool
+            bool_var3: bool
+            bool_var4: bool
+            int_var: int
+            float_var: float
+
+        spec = datadotenv(MyDotenv)
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'STR_VAR="foo"',
+                'BOOL_VAR1=True',
+                "BOOL_VAR2='true'",
+                'BOOL_VAR3="False"',
+                'BOOL_VAR4=false',
+                'INT_VAR=42',
+                'FLOAT_VAR=3.14',
+            ])),
+            MyDotenv(
+                str_var="foo",
+                bool_var1=True,
+                bool_var2=True,
+                bool_var3=False,
+                bool_var4=False,
+                int_var=42,
+                float_var=3.14,
+            )
+        )
+
+
+
+class TestIterNameValuesFromChars(TestCase):
 
     def test_parses_unquoted_key_value_pair(self):
-        it = iter_key_values_from_chars("KEY=value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY=value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("key=value")
-        self.assertEqual(next(it), ("key", "value"))
+        it = iter_vars_from_dotenv_chars("key=value")
+        self.assertEqual(next(it), Var("key", "value"))
         
-        it = iter_key_values_from_chars("KEY1=value")
-        self.assertEqual(next(it), ("KEY1", "value"))
+        it = iter_vars_from_dotenv_chars("KEY1=value")
+        self.assertEqual(next(it), Var("KEY1", "value"))
 
-        it = iter_key_values_from_chars("KEY =value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY =value")
+        self.assertEqual(next(it), Var("KEY", "value"))
 
-        it = iter_key_values_from_chars("KEY= value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY= value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("KEY = value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY = value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("KEY\t=\t\tvalue")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY\t=\t\tvalue")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars(" KEY=value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars(" KEY=value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("\tKEY=value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("\tKEY=value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("\nKEY=value")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("\nKEY=value")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("KEY=value ")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY=value ")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("KEY=value\t")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY=value\t")
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars("KEY=value\n")
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars("KEY=value\n")
+        self.assertEqual(next(it), Var("KEY", "value"))
 
     def test_parses_doubly_quoted_values(self):
-        it = iter_key_values_from_chars('KEY="value"')
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars('KEY="value"')
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars('KEY=" value"')
-        self.assertEqual(next(it), ("KEY", " value"))
+        it = iter_vars_from_dotenv_chars('KEY=" value"')
+        self.assertEqual(next(it), Var("KEY", " value"))
         
-        it = iter_key_values_from_chars('KEY="value "')
-        self.assertEqual(next(it), ("KEY", "value "))
+        it = iter_vars_from_dotenv_chars('KEY="value "')
+        self.assertEqual(next(it), Var("KEY", "value "))
         
-        it = iter_key_values_from_chars('KEY= "value"')
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars('KEY= "value"')
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars('KEY="value" ')
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars('KEY="value" ')
+        self.assertEqual(next(it), Var("KEY", "value"))
 
-        it = iter_key_values_from_chars('KEY="value with \'single-quotes\'"')
-        self.assertEqual(next(it), ("KEY", "value with 'single-quotes'"))
+        it = iter_vars_from_dotenv_chars('KEY="value with \'single-quotes\'"')
+        self.assertEqual(next(it), Var("KEY", "value with 'single-quotes'"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \"double-quotes\""')
-        self.assertEqual(next(it), ("KEY", 'value with escaped "double-quotes"'))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \"double-quotes\""')
+        self.assertEqual(next(it), Var("KEY", 'value with escaped "double-quotes"'))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \nnewline"')
-        self.assertEqual(next(it), ("KEY", "value with escaped \nnewline"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \nnewline"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \nnewline"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped\ttab"')
-        self.assertEqual(next(it), ("KEY", "value with escaped\ttab"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped\ttab"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped\ttab"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \\ backslash"')
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \\ backslash"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \\ backslash"))
         
-        it = iter_key_values_from_chars('KEY= "value"')
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars('KEY= "value"')
+        self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_key_values_from_chars('KEY="value" ')
-        self.assertEqual(next(it), ("KEY", "value"))
+        it = iter_vars_from_dotenv_chars('KEY="value" ')
+        self.assertEqual(next(it), Var("KEY", "value"))
 
-        it = iter_key_values_from_chars('KEY="value with \'single-quotes\'"')
-        self.assertEqual(next(it), ("KEY", "value with 'single-quotes'"))
+        it = iter_vars_from_dotenv_chars('KEY="value with \'single-quotes\'"')
+        self.assertEqual(next(it), Var("KEY", "value with 'single-quotes'"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \"double-quotes\""')
-        self.assertEqual(next(it), ("KEY", 'value with escaped "double-quotes"'))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \"double-quotes\""')
+        self.assertEqual(next(it), Var("KEY", 'value with escaped "double-quotes"'))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \nnewline"')
-        self.assertEqual(next(it), ("KEY", "value with escaped \nnewline"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \nnewline"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \nnewline"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped\ttab"')
-        self.assertEqual(next(it), ("KEY", "value with escaped\ttab"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped\ttab"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped\ttab"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \\ backslash"')
-        self.assertEqual(next(it), ("KEY", "value with escaped \\ backslash"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \\ backslash"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \\ backslash"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \' single-quote"')
-        self.assertEqual(next(it), ("KEY", "value with escaped ' single-quote"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \' single-quote"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped ' single-quote"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \r\nCR LF"')
-        self.assertEqual(next(it), ("KEY", "value with escaped \r\nCR LF"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \r\nCR LF"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \r\nCR LF"))
         
-        it = iter_key_values_from_chars(r'KEY="value with escaped \r\nCR LF"')
-        self.assertEqual(next(it), ("KEY", "value with escaped \r\nCR LF"))
+        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \r\nCR LF"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \r\nCR LF"))
 
     def test_parses_singly_quoted_values(self):
-        it = iter_key_values_from_chars("KEY='value'")
-        self.assertEqual(next(it), ("KEY", "value")) 
+        it = iter_vars_from_dotenv_chars("KEY='value'")
+        self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_key_values_from_chars("KEY=' value'")
-        self.assertEqual(next(it), ("KEY", " value")) 
+        it = iter_vars_from_dotenv_chars("KEY=' value'")
+        self.assertEqual(next(it), Var("KEY", " value")) 
         
-        it = iter_key_values_from_chars("KEY='value '")
-        self.assertEqual(next(it), ("KEY", "value ")) 
+        it = iter_vars_from_dotenv_chars("KEY='value '")
+        self.assertEqual(next(it), Var("KEY", "value ")) 
         
-        it = iter_key_values_from_chars("KEY= 'value'")
-        self.assertEqual(next(it), ("KEY", "value")) 
+        it = iter_vars_from_dotenv_chars("KEY= 'value'")
+        self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_key_values_from_chars("KEY='value' ")
-        self.assertEqual(next(it), ("KEY", "value")) 
+        it = iter_vars_from_dotenv_chars("KEY='value' ")
+        self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_key_values_from_chars(r"KEY='value with escaped backslash \\'")
-        self.assertEqual(next(it), ("KEY", "value with escaped backslash \\")) 
+        it = iter_vars_from_dotenv_chars(r"KEY='value with escaped backslash \\'")
+        self.assertEqual(next(it), Var("KEY", "value with escaped backslash \\")) 
         
-        it = iter_key_values_from_chars(r"KEY='value with escaped quote \''")
-        self.assertEqual(next(it), ("KEY", "value with escaped quote '")) 
+        it = iter_vars_from_dotenv_chars(r"KEY='value with escaped quote \''")
+        self.assertEqual(next(it), Var("KEY", "value with escaped quote '")) 
 
     def test_parses_empty_values(self):
-        it = iter_key_values_from_chars("KEY=")
-        self.assertEqual(next(it), ("KEY", ""))
+        it = iter_vars_from_dotenv_chars("KEY=")
+        self.assertEqual(next(it), Var("KEY", ""))
         
-        it = iter_key_values_from_chars("KEY= ")
-        self.assertEqual(next(it), ("KEY", ""))
+        it = iter_vars_from_dotenv_chars("KEY= ")
+        self.assertEqual(next(it), Var("KEY", ""))
         
-        it = iter_key_values_from_chars("KEY=\t")
-        self.assertEqual(next(it), ("KEY", ""))
+        it = iter_vars_from_dotenv_chars("KEY=\t")
+        self.assertEqual(next(it), Var("KEY", ""))
         
-        it = iter_key_values_from_chars("KEY=\n")
-        self.assertEqual(next(it), ("KEY", ""))
+        it = iter_vars_from_dotenv_chars("KEY=\n")
+        self.assertEqual(next(it), Var("KEY", ""))
         
-        it = iter_key_values_from_chars("KEY=\t\n")
-        self.assertEqual(next(it), ("KEY", ""))
+        it = iter_vars_from_dotenv_chars("KEY=\t\n")
+        self.assertEqual(next(it), Var("KEY", ""))
 
     def test_parses_blank_lines_and_empty_string(self):
-        it = iter_key_values_from_chars("")
+        it = iter_vars_from_dotenv_chars("")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_key_values_from_chars("\n")
+        it = iter_vars_from_dotenv_chars("\n")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_key_values_from_chars("\t")
+        it = iter_vars_from_dotenv_chars("\t")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_key_values_from_chars("\n".join([
+        it = iter_vars_from_dotenv_chars("\n".join([
             "",
             "KEY1=value1",
             "",
@@ -165,26 +206,26 @@ class TestIterKeyValuesFromChars(TestCase):
             "KEY3=value3",
             "",
         ]))
-        self.assertEqual(next(it), ("KEY1", "value1"))
-        self.assertEqual(next(it), ("KEY2", "value2"))
-        self.assertEqual(next(it), ("KEY3", "value3"))
+        self.assertEqual(next(it), Var("KEY1", "value1"))
+        self.assertEqual(next(it), Var("KEY2", "value2"))
+        self.assertEqual(next(it), Var("KEY3", "value3"))
 
     def test_parses_multiple_key_value_pairs(self):
-        it = iter_key_values_from_chars("\n".join([
+        it = iter_vars_from_dotenv_chars("\n".join([
             "KEY1=value1",
             "KEY2=value2",
             'KEY3="value3"',
             "KEY4='value4'",
             "'KEY5'=value5",
         ]))
-        self.assertEqual(next(it), ("KEY1", "value1"))
-        self.assertEqual(next(it), ("KEY2", "value2"))
-        self.assertEqual(next(it), ("KEY3", "value3"))
-        self.assertEqual(next(it), ("KEY4", "value4"))
-        self.assertEqual(next(it), ("KEY5", "value5"))
+        self.assertEqual(next(it), Var("KEY1", "value1"))
+        self.assertEqual(next(it), Var("KEY2", "value2"))
+        self.assertEqual(next(it), Var("KEY3", "value3"))
+        self.assertEqual(next(it), Var("KEY4", "value4"))
+        self.assertEqual(next(it), Var("KEY5", "value5"))
 
     def test_parses_comments(self):
-        it = iter_key_values_from_chars("\n".join([
+        it = iter_vars_from_dotenv_chars("\n".join([
             "KEY1=value1",
             "# Comment on separate line",
             "KEY2=value2 # Comment after unquoted value",
@@ -192,11 +233,11 @@ class TestIterKeyValuesFromChars(TestCase):
             "KEY4='value4'# Comment after single-quoted value",
             "KEY5=# Commend after empty value"
         ]))
-        self.assertEqual(next(it), ("KEY1", "value1"))
-        self.assertEqual(next(it), ("KEY2", "value2"))
-        self.assertEqual(next(it), ("KEY3", "value3"))
-        self.assertEqual(next(it), ("KEY4", "value4"))
-        self.assertEqual(next(it), ("KEY5", ""))
+        self.assertEqual(next(it), Var("KEY1", "value1"))
+        self.assertEqual(next(it), Var("KEY2", "value2"))
+        self.assertEqual(next(it), Var("KEY3", "value3"))
+        self.assertEqual(next(it), Var("KEY4", "value4"))
+        self.assertEqual(next(it), Var("KEY5", ""))
 
 
 if __name__ == "__main__":
