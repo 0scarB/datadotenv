@@ -4,7 +4,7 @@ import dataclasses
 from dataclasses import dataclass
 import types
 import typing
-from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Protocol, Type, TypeAlias, TypeVar
+from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Literal, Protocol, Type, TypeAlias, TypeVar
 
 
 _T = TypeVar("_T")
@@ -18,24 +18,57 @@ class _Dataclass(Protocol):
 _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 
 
+_CasingTransformation: TypeAlias = Literal["upper", "lower", "preserve"]
+
+
 def datadotenv(
     datacls: Type[_TDataclass],
+    /, *,
+    case: _CasingTransformation = "upper",
+    ignore_case: bool = False,
+    allow_incomplete: bool = False,
 ) -> _Spec[_TDataclass]:
-    _var_specs: list[_VarSpec] = []
-    for field in dataclasses.fields(datacls):
-        _var_specs.append(_VarSpecSingleton(
-            dataclass_field_name=field.name,
-            validate_and_convert=_choose_validator_and_converter(
-                field.name,
-                field.type
-            )
-        ))
+    
+    def placeholder_validate_and_convert(_: Var) -> Any:
+        raise RuntimeError(
+            f"{_VarSpecSingleton.validate_and_convert.__qualname__} "
+            f"must be set by {_mut_var_spec_for_type.__qualname__}!"
+        )
 
-    return _Spec(datacls, _var_specs)
+    var_specs: list[_VarSpec] = []
+    for field in dataclasses.fields(datacls):
+        var_spec = _VarSpecSingleton(
+            dataclass_field_name=field.name,
+            dotenv_var_name=_transform_case(case, field.name),
+            ignore_case=ignore_case,
+            default=field.default,
+            target_strategy=_VarSpecTargetByName(
+                name=
+                    field.name.lower() if ignore_case
+                    else field.name.upper(),
+                ignore_case=ignore_case,
+            ),
+            validate_and_convert=placeholder_validate_and_convert,
+        )
+        _mut_var_spec_for_type(var_spec, field.type)
+        var_specs.append(var_spec)
+
+    return _Spec(
+        datacls, 
+        var_specs,
+        allow_incomplete=allow_incomplete,
+    )
+
+
+def _mut_var_spec_for_type(var_spec: _VarSpec, type_: Any) -> None:
+    var_spec.validate_and_convert = _choose_validator_and_converter(
+        var_spec,
+        type_,
+    )
 
 
 def _choose_validator_and_converter(
-        dataclass_field_name: str,
+        var_spec: _VarSpec,
         type_: Any,
 ) -> Callable[[Var], Any]:
     if type(type_) is str:
@@ -52,10 +85,10 @@ def _choose_validator_and_converter(
     elif isinstance(type_, types.NoneType):
         return _validate_and_convert_unset
     elif getattr(type_, "__name__") == "Literal":
-        return _create_validate_and_convert_literal(dataclass_field_name, type_)
+        return _create_validate_and_convert_literal(var_spec, type_)
     else:
         raise DatadotenvNotImplementedError(
-            f"No handling for type of dataclass field '{dataclass_field_name}: {type_.__name__}'!"
+            f"No handling for type of dataclass field '{var_spec.dataclass_field_name}: {type_.__name__}'!"
         )
 
 
@@ -68,56 +101,56 @@ def _validate_and_convert_str(env_var: Var) -> str:
     return env_var.value
 
 
-def _validate_and_convert_bool(env_var: Var) -> bool:
-    str_value = _validate_and_convert_str(env_var)
+def _validate_and_convert_bool(var: Var) -> bool:
+    str_value = _validate_and_convert_str(var)
     if str_value == "true" or str_value == "True":
         return True
     elif str_value == "false" or str_value == "False":
         return False
 
     raise DatadotenvConversionError(
-        f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'bool'!"
+        f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'bool'!"
     )
 
 
-def _validate_and_convert_int(env_var: Var) -> bool:
-    str_value = _validate_and_convert_str(env_var)
+def _validate_and_convert_int(var: Var) -> bool:
+    str_value = _validate_and_convert_str(var)
     try:
         return int(str_value)
     except ValueError:
         raise DatadotenvConversionError(
-            f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'int'!"
+            f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'int'!"
         )
 
 
-def _validate_and_convert_float(env_var: Var) -> bool:
-    str_value = _validate_and_convert_str(env_var)
+def _validate_and_convert_float(var: Var) -> bool:
+    str_value = _validate_and_convert_str(var)
     try:
         return float(str_value)
     except ValueError:
         raise DatadotenvConversionError(
-            f"Failed to convert dotenv variable {env_var.name}='{env_var.value}' to type 'float'!"
+            f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'float'!"
         )
 
 
-def _validate_and_convert_unset(env_var: Var) -> None:
-    if env_var.value is None:
+def _validate_and_convert_unset(var: Var) -> None:
+    if var.value is None:
         return None
 
     raise DatadotenvConversionError(
-        f"Expected dotenv varibale '{env_var.name}' to be unset, not '{env_var.value}'!"
+        f"Expected dotenv varibale '{var.name}' to be unset, not '{var.value}'!"
     )
 
 
 def _create_validate_and_convert_literal(
-        dataclass_field_name: str, 
+        var_spec: _VarSpec, 
         literal: _T
 ) -> Callable[[Var], _T]:
     
     def validate_and_convert(env_var: Var) -> _T:
         options = typing.get_args(literal)
         for option in options:
-            f = _choose_validator_and_converter(dataclass_field_name, type(option))
+            f = _choose_validator_and_converter(var_spec, type(option))
             try:
                 if option == f(env_var):
                     return option
@@ -142,18 +175,30 @@ class Var:
 
 
 @dataclass
-class _VarSpecBase:
-    dataclass_field_name: str
+class _VarSpecTargetByName:
+    name: str
+    ignore_case: bool 
+
+
+_VarSpecTargetStrategy: TypeAlias = _VarSpecTargetByName
 
 
 @dataclass
-class _VarSpecSingleton(Generic[_T], _VarSpecBase):
+class _VarSpecBase(Generic[_T]):
+    dataclass_field_name: str
+    dotenv_var_name: str
+    ignore_case: bool
+    default: _T | Type[dataclasses.MISSING]
+    target_strategy: _VarSpecTargetStrategy
+
+
+@dataclass
+class _VarSpecSingleton(_VarSpecBase[_T]):
     validate_and_convert: Callable[[Var], _T]
 
 
 @dataclass
-class _VarSpecAccumulator(Generic[_T], _VarSpecBase):
-    accumulator: _T
+class _VarSpecAccumulator(_VarSpecBase[_T]):
     validate_and_accumulate: Callable[[_T, Var], _T]
 
 
@@ -161,101 +206,175 @@ _VarSpec: TypeAlias = _VarSpecSingleton[Any] | _VarSpecAccumulator[Any]
 
 
 class _Spec(Generic[_TDataclass]):
-    _ignore_case: bool
-    _ignore_not_in_dataclass: bool
-
     _datacls: Type[_TDataclass]
-    _var_specs: list[_VarSpec]
-    _expected_env_var_name_to_var_spec_index: dict[str, int]
-    _discover_var_spec: Callable[[list[_VarSpec], str], _VarSpec]
+    _var_specs: _VarSpecRepository
+
+    _allow_incomplete: bool
 
     def __init__(
             self,
             datacls: _TDataclass,
             var_specs: list[_VarSpec],
-            ignore_case: bool = True,
-            ignore_not_in_dataclass: bool = False,
+            allow_incomplete: bool,
     ) -> None:
-        self._ignore_case = ignore_case
-        self._ignore_not_in_dataclass = ignore_not_in_dataclass
-
         self._datacls = datacls
-        self._var_specs = var_specs
-        self._expected_env_var_name_to_var_spec_index = {}
-        self._repopulate_expected_env_var_name_to_var_spec_index()
+        self._var_specs = _VarSpecRepository(var_specs)
 
-        def discover_var_spec(
-                var_specs: list[_VarSpec], 
-                env_var_name: str,
-        ) -> _VarSpec:
-            original_env_var_name = env_var_name
-            if self._ignore_case:
-                env_var_name = env_var_name.lower()
-            elif not env_var_name.isupper():
-                raise DatadotenvCasingError(
-                    "Only uppercase dotenv variable names are supported when `ignore_case=False`. "
-                    f"Mixed or lowercase dotenv variable: '{env_var_name}'!"
-                )
-            try:
-                spec_idx = self._expected_env_var_name_to_var_spec_index[env_var_name]
-            except KeyError:
-                if not self._ignore_not_in_dataclass:
-                    raise DatadotenvNotInDataclassError(
-                        f"No dataclass attribute '{env_var_name.lower()}' "
-                        f"specified for dotenv variable '{original_env_var_name}'!"
-                    )
-            
-            return var_specs[spec_idx]
-
-        self._discover_var_spec = discover_var_spec
+        self._allow_incomplete = allow_incomplete
 
     def from_chars(
             self,
-            chars: Iterable[str]
+            chars: Iterable[str],
     ) -> _TDataclass:
-        kwargs: dict[str, Any] = {}
-        unhandled_dataclass_fields = {
-            var_spec.dataclass_field_name 
-            for var_spec in self._var_specs
-        }
+        var_spec_resolve_group = _VarSpecResolveGroup(self._var_specs)
+
+        dataclass_kwargs: dict[str, Any] = {}
+
         for var in iter_vars_from_dotenv_chars(chars):
-            var_spec = self._discover_var_spec(self._var_specs, var.name)
-            if isinstance(var_spec, _VarSpecSingleton):
-                kwargs[var_spec.dataclass_field_name] = var_spec.validate_and_convert(
-                    var,
-                )
-                try:
-                    unhandled_dataclass_fields.remove(var_spec.dataclass_field_name)
-                except KeyError:
-                    raise DatadotenvDuplicateVariableError(
-                        f"Dotenv has duplicate variable '{var.name}'!"
-                    )
-            elif isinstance(var_spec, _VarSpecAccumulator):
-                raise DatadotenvNotImplementedError
-            else:
-                raise RuntimeError(
-                    f"Unhandled var_spec type '{type(var_spec).__name__}' with value {var_spec}!"
+            var_spec = (
+                var_spec_resolve_group
+                .find_spec_for_var_and_mark_as_resolved(var)
+            )
+            dataclass_kwargs[var_spec.dataclass_field_name] = \
+                var_spec.validate_and_convert(var)
+
+        for unresolved_var_spec \
+                in var_spec_resolve_group.get_unresolved_specs():
+            if unresolved_var_spec.default != dataclasses.MISSING:
+                dataclass_kwargs[unresolved_var_spec.dataclass_field_name] = unresolved_var_spec.default
+                var_spec_resolve_group.mark_as_resolved(
+                    unresolved_var_spec
                 )
 
-        if unhandled_dataclass_fields:
-            missing_variables = ", ".join(f"'{field.upper()}'" for field in unhandled_dataclass_fields)
-            raise DatadotenvMissingVariableError(
-                f"Dotenv is missing the variables: {missing_variables}!"
-            )
+        self._raise_on_missing(
+            var_spec_resolve_group.get_unresolved_specs()
+        )
         
-        return self._datacls(**kwargs)
+        return self._datacls(**dataclass_kwargs)
 
     from_str = from_chars
 
-    def _repopulate_expected_env_var_name_to_var_spec_index(self):
-        self._expected_env_var_name_to_var_spec_index.clear()
-        for idx, spec in enumerate(self._var_specs):
-            expected_env_var_name = spec.dataclass_field_name
-            if self._ignore_case:
-                expected_env_var_name = expected_env_var_name.lower()
-            else:
-                expected_env_var_name = expected_env_var_name.upper()
-            self._expected_env_var_name_to_var_spec_index[expected_env_var_name] = idx
+    def _raise_on_missing(self, missing_var_specs: Iterable[_VarSpec]) -> None:
+        missing_var_specs = list(missing_var_specs)
+        if len(missing_var_specs) == 0:
+            return
+
+        missing_dataclass_field_names: list[str] = []
+        missing_var_names: list[str] = []
+        for unresolved_spec in missing_var_specs:
+            missing_dataclass_field_names\
+                .append(unresolved_spec.dataclass_field_name)
+            missing_var_names\
+                .append(unresolved_spec.dotenv_var_name)
+        
+        missing_dataclass_field_names_str = ", ".join(
+            f"'{name}'" for name in missing_dataclass_field_names
+        )
+        missing_var_names_str = ", ".join(
+            f"'{name}'" for name in missing_var_names
+        )
+
+        raise DatadotenvMissingVariableError(
+            f"The dataclass '{self._datacls.__name__}' "
+            f"contains the fields {missing_dataclass_field_names_str}, "
+            f"but the variables {missing_var_names_str} are not set in the dotenv!"
+        )
+
+class _VarSpecRepository:
+    _specs: list[_VarSpec]
+    _case_sensitive_names_to_spec_indices = dict[str, int]
+    _case_insensitive_names_to_spec_indices = dict[str, int]
+
+    def __init__(self, var_specs: list[_VarSpec]) -> None:
+        self.update(var_specs)
+
+    def update(self, var_specs: list[_VarSpec]) -> None:
+        self._specs = var_specs
+        self._case_sensitive_names_to_spec_indices = \
+            self._create_case_sensitive_names_to_spec_indices_map(var_specs)
+        self._case_insensitive_names_to_spec_indices = \
+            self._create_case_insensitive_names_to_spec_indices_map(var_specs)
+
+    def find_spec_idx_for_var(self, var: Var) -> int:
+        return self.find_spec_idx_for_var_name(var.name)
+
+    def find_spec_idx_for_var_name(self, name: str) -> int:
+        case_sensitive_name = name
+        try:
+            return self._case_sensitive_names_to_spec_indices[case_sensitive_name]
+        except KeyError:
+            pass
+
+        case_insensitive_name = case_sensitive_name.lower()
+        try:
+            return self._case_insensitive_names_to_spec_indices[case_insensitive_name]
+        except KeyError:
+            pass
+
+        raise DatadotenvNotInDataclassError(
+            f"No field for dotenv variable '{name}' is specified in the dataclass!"
+        ) 
+
+    def __getitem__(self, idx: int) -> _VarSpec:
+        return self._specs[idx]
+
+    def __len__(self) -> int:
+        return len(self._specs)
+    
+    def __iter__(self) -> Iterable[_VarSpec]:
+        return iter(self._specs)
+
+    def _create_case_sensitive_names_to_spec_indices_map(
+            self,
+            specs: list[_VarSpec],
+    ) -> dict[str, int]:
+        map_: dict[str, int] = {}
+        for idx, spec in enumerate(specs):
+            if spec.ignore_case:
+                continue
+            map_[spec.dotenv_var_name] = idx
+
+        return map_
+
+    def _create_case_insensitive_names_to_spec_indices_map(
+            self,
+            specs: list[_VarSpec],
+    ) -> dict[str, int]:
+        map_: dict[str, int] = {}
+        for idx, spec in enumerate(specs):
+            if not spec.ignore_case:
+                continue
+            map_[spec.dotenv_var_name.lower()] = idx
+
+        return map_
+
+
+class _VarSpecResolveGroup:
+    _specs: _VarSpecRepository
+    _resolved: list[bool]
+
+    def __init__(self, specs_repo: _VarSpecRepository) -> None:
+        self._specs = specs_repo
+        self._resolved = [False] * len(self._specs)
+
+    def mark_as_resolved(self, spec: _VarSpec) -> None:
+        idx = self._specs.find_spec_idx_for_var_name(
+            spec.dotenv_var_name,
+        )
+        self._resolved[idx] = True
+
+    def find_spec_for_var_and_mark_as_resolved(
+            self,
+            var: Var,
+    ) -> _VarSpec:
+        idx = self._specs.find_spec_idx_for_var(var)
+        self._resolved[idx] = True
+        return self._specs[idx]
+
+    def get_unresolved_specs(self) -> Iterator[_VarSpec]:
+        for spec, is_resolved in zip(self._specs, self._resolved):
+            if not is_resolved:
+                yield spec
 
 
 def iter_vars_from_dotenv_chars(
@@ -273,7 +392,7 @@ def iter_vars_from_dotenv_chars(
     
     Parser implementation is scannerless with low memory overhead.
     """
-    return _iter_name_values_from_chars_core(iter(chars))
+    return _iter_vars_from_dotenv_chars(iter(chars))
 
 
 _PARSER_STATE_BEFORE_NAME = 0
@@ -288,7 +407,7 @@ _PARSER_STATE_AFTER_VAL = 8
 _PARSER_STATE_IN_COMMENT = 9
 
 
-def _iter_name_values_from_chars_core(
+def _iter_vars_from_dotenv_chars(
         chars: Iterator[str],
 ) -> Iterator[tuple[str, str]]:
     # Parse implementation tries to be compatible with python-dotenv.
@@ -502,3 +621,14 @@ class DatadotenvConversionError(DatadotenvError, ValueError):
 
 class DatadotenvNotImplementedError(NotImplementedError):
     pass
+
+
+def _transform_case(transformation: Literal["upper"], s: str) -> str:
+    if transformation == "upper":
+        return s.upper()
+    elif transformation == "lower":
+        return s.lower()
+    elif transformation == "preserve":
+        return s
+
+    raise ValueError(f"Unknown casing transformation: '{transformation}'!")

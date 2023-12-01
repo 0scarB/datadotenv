@@ -67,6 +67,49 @@ class TestDatadotenv(TestCase):
             )
         )
 
+    def test_instantiates_dataclass_with_defaults(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            str_var: str = "foo"
+            int_var: int = 42
+            float_var: float = 3.14
+            none_var: None = None
+            literal_var: Literal["foo", "bar"] = "foo"
+        
+        spec = datadotenv(MyDotenv)
+
+        # Test will use defaults when unset
+        self.assertEqual(
+            spec.from_str(""),
+            MyDotenv(
+                str_var="foo",
+                int_var=42,
+                float_var=3.14,
+                none_var=None,
+                literal_var="foo"
+            )
+        )
+
+        # Test defaults can be overridden when set 
+        self.assertEqual(
+            spec.from_str("\n".join([
+                "STR_VAR=bar",
+                "INT_VAR=420",
+                "FLOAT_VAR=2.71",
+                "NONE_VAR=",
+                "LITERAL_VAR=bar",
+            ])),
+            MyDotenv(
+                str_var="bar",
+                int_var=420,
+                float_var=2.71,
+                none_var=None,
+                literal_var="bar"
+            )
+        )
+
+
 class TestIterNameValuesFromChars(TestCase):
 
     def test_parses_unquoted_key_value_pair(self):
