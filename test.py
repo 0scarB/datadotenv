@@ -4,7 +4,7 @@ import unittest
 from unittest import TestCase
 
 
-from src import datadotenv, iter_vars_from_dotenv_chars, Var
+from src import DatadotenvNotInDataclassError, datadotenv, iter_vars_from_dotenv_chars, Var
 
 
 class TestDatadotenv(TestCase):
@@ -174,6 +174,42 @@ class TestDatadotenv(TestCase):
                 normal_casing="foo",
                 mixed_CASING="bar",
             )
+        )
+
+    def test_supports_different_options_for_complete_or_incomplete_description_of_dotenv(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            var: str
+
+        # Test default: dataclass must fully describe dotenv
+        with self.assertRaises(DatadotenvNotInDataclassError):
+            self.assertEqual(
+                datadotenv(MyDotenv).from_str("\n".join([
+                    'VAR=foo',
+                    'NOT_DESCRIBED_IN_DATACLASS=bar',
+                ])),
+                MyDotenv(var="foo")
+            )
+            
+        # Test explicit: dataclass must fully describe dotenv
+        # using `allow_incomplete=False`
+        with self.assertRaises(DatadotenvNotInDataclassError):
+            self.assertEqual(
+                datadotenv(MyDotenv, allow_incomplete=False).from_str("\n".join([
+                    'VAR=foo',
+                    'NOT_DESCRIBED_IN_DATACLASS=bar',
+                ])),
+                MyDotenv(var="foo")
+            )
+
+        # Test can accept incomplete dataclass with `allow_incomplete=True` 
+        self.assertEqual(
+            datadotenv(MyDotenv, allow_incomplete=True).from_str("\n".join([
+                'VAR=foo',
+                'NOT_DESCRIBED_IN_DATACLASS=bar',
+            ])),
+            MyDotenv(var="foo")
         )
 
 

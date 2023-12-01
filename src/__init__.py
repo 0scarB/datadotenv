@@ -226,12 +226,16 @@ class _Spec(Generic[_TDataclass]):
         dataclass_kwargs: dict[str, Any] = {}
 
         for var in iter_vars_from_dotenv_chars(chars):
-            var_spec = (
-                var_spec_resolve_group
-                .find_spec_for_var_and_mark_as_resolved(var)
-            )
-            dataclass_kwargs[var_spec.dataclass_field_name] = \
-                var_spec.validate_and_convert(var)
+            try:
+                var_spec = (
+                    var_spec_resolve_group
+                    .find_spec_for_var_and_mark_as_resolved(var)
+                )
+                dataclass_kwargs[var_spec.dataclass_field_name] = \
+                    var_spec.validate_and_convert(var)
+            except DatadotenvNotInDataclassError as err:
+                if not self._allow_incomplete:
+                    raise err
 
         for unresolved_var_spec \
                 in var_spec_resolve_group.get_unresolved_specs():
