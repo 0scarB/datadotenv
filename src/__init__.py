@@ -18,14 +18,13 @@ class _Dataclass(Protocol):
 _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 
 
-_CasingTransformation: TypeAlias = Literal["upper", "lower", "preserve"]
+_Casing: TypeAlias = Literal["upper", "lower", "preserve", "ignore"]
 
 
 def datadotenv(
     datacls: Type[_TDataclass],
     /, *,
-    case: _CasingTransformation = "upper",
-    ignore_case: bool = False,
+    case: _Casing = "upper",
     allow_incomplete: bool = False,
 ) -> _Spec[_TDataclass]:
     
@@ -40,13 +39,10 @@ def datadotenv(
         var_spec = _VarSpecSingleton(
             dataclass_field_name=field.name,
             dotenv_var_name=_transform_case(case, field.name),
-            ignore_case=ignore_case,
             default=field.default,
             target_strategy=_VarSpecTargetByName(
-                name=
-                    field.name.lower() if ignore_case
-                    else field.name.upper(),
-                ignore_case=ignore_case,
+                name=_transform_case(case, field.name),
+                ignore_case=case == "ignore",
             ),
             validate_and_convert=placeholder_validate_and_convert,
         )
@@ -187,7 +183,6 @@ _VarSpecTargetStrategy: TypeAlias = _VarSpecTargetByName
 class _VarSpecBase(Generic[_T]):
     dataclass_field_name: str
     dotenv_var_name: str
-    ignore_case: bool
     default: _T | Type[dataclasses.MISSING]
     target_strategy: _VarSpecTargetStrategy
 
@@ -330,9 +325,11 @@ class _VarSpecRepository:
     ) -> dict[str, int]:
         map_: dict[str, int] = {}
         for idx, spec in enumerate(specs):
-            if spec.ignore_case:
-                continue
-            map_[spec.dotenv_var_name] = idx
+            if (
+                isinstance(spec.target_strategy, _VarSpecTargetByName)
+                and not spec.target_strategy.ignore_case
+            ):
+                map_[spec.dotenv_var_name] = idx
 
         return map_
 
@@ -342,9 +339,11 @@ class _VarSpecRepository:
     ) -> dict[str, int]:
         map_: dict[str, int] = {}
         for idx, spec in enumerate(specs):
-            if not spec.ignore_case:
-                continue
-            map_[spec.dotenv_var_name.lower()] = idx
+            if (
+                isinstance(spec.target_strategy, _VarSpecTargetByName)
+                and spec.target_strategy.ignore_case
+            ):
+                map_[spec.dotenv_var_name.lower()] = idx
 
         return map_
 
@@ -630,5 +629,7 @@ def _transform_case(transformation: Literal["upper"], s: str) -> str:
         return s.lower()
     elif transformation == "preserve":
         return s
+    elif transformation == "ignore":
+        return s.lower()
 
     raise ValueError(f"Unknown casing transformation: '{transformation}'!")

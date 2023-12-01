@@ -109,6 +109,73 @@ class TestDatadotenv(TestCase):
             )
         )
 
+    def test_supports_different_casing_options(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            normal_casing: str
+            mixed_CASING: str
+        
+        # Test defaults to uppercase
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                'NORMAL_CASING=foo',
+                'MIXED_CASING=bar',
+            ])),
+            MyDotenv(
+                normal_casing="foo",
+                mixed_CASING="bar",
+            )
+        )
+        
+        # Test explicit uppercase
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv, case="upper").from_str("\n".join([
+                'NORMAL_CASING=foo',
+                'MIXED_CASING=bar',
+            ])),
+            MyDotenv(
+                normal_casing="foo",
+                mixed_CASING="bar",
+            )
+        )
+        
+        # Test lowercase
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv, case="lower").from_str("\n".join([
+                'normal_casing=foo',
+                'mixed_casing=bar',
+            ])),
+            MyDotenv(
+                normal_casing="foo",
+                mixed_CASING="bar",
+            )
+        )
+        
+        # Test preserve casing
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv, case="preserve").from_str("\n".join([
+                'normal_casing=foo',
+                'mixed_CASING=bar',
+            ])),
+            MyDotenv(
+                normal_casing="foo",
+                mixed_CASING="bar",
+            )
+        )
+
+        # Test ignore casing
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv, case="ignore").from_str("\n".join([
+                'nOrMaL_cAsInG=foo',
+                'MiXeD_cAsInG=bar',
+            ])),
+            MyDotenv(
+                normal_casing="foo",
+                mixed_CASING="bar",
+            )
+        )
+
 
 class TestIterNameValuesFromChars(TestCase):
 
