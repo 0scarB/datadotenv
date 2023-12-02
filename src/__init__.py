@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+import datetime
 from pathlib import Path
 import types
 import typing
@@ -108,6 +109,12 @@ def _choose_validator_and_converter(
         return _create_validate_and_convert_literal(var_spec, type_)
     elif _issubclass_safe(type_, Path):
         return _create_validate_and_convert_file_path(var_spec)
+    elif type_ is datetime.datetime:
+        return _validate_and_convert_datetime
+    elif type_ is datetime.date:
+        return _validate_and_convert_date
+    elif type_ is datetime.timedelta:
+        return _validate_and_convert_timedelta
     elif type_ is str:
         return _validate_and_convert_str
     else:
@@ -248,6 +255,24 @@ def _create_validate_and_convert_file_path(
     return validate_and_convert
 
 
+def _validate_and_convert_datetime(var: Var) -> datetime.datetime:
+    try:
+        return datetime.datetime.fromisoformat(var.value)
+    except ValueError as err:
+        raise error.CannotParse(f"Cannot parse datetime: {str(err).removeprefix('ValueError: ')}")
+
+
+def _validate_and_convert_date(var: Var) -> datetime.date:
+    try:
+        return datetime.date.fromisoformat(var.value)
+    except ValueError as err:
+        raise error.CannotParse(f"Cannot parse date: {str(err).removeprefix('ValueError: ')}")
+
+
+def _validate_and_convert_timedelta(var: Var) -> datetime.timedelta:
+    return parse.timedelta(var.value)
+
+
 @dataclass
 class Var:
     name: str
@@ -316,7 +341,7 @@ class _Spec(Generic[_TDataclass]):
 
         dataclass_kwargs: dict[str, Any] = {}
 
-        for var in iter_vars_from_dotenv_chars(chars):
+        for var in parse.dotenv_from_chars_iter(chars):
             try:
                 var_spec = (
                     var_spec_resolve_group
@@ -472,210 +497,382 @@ class _VarSpecResolveGroup:
                 yield spec
 
 
-def iter_vars_from_dotenv_chars(
-        chars: Iterable[str],
-) -> Iterator[Var]:
-    """
-    Parse an iterator of characters in the .env file format
-    and yield `Var` objects containing the dotenv variable 
-    names and values.
+class _Parse:
 
-    The format rules try to follow those of `python-dotenv`.
-    See: https://pypi.org/project/python-dotenv/ -- Section: File format
+    def dotenv_from_chars_iter(
+            self,
+            chars: Iterable[str],
+    ) -> Iterator[Var]:
+        """
+        Parse an iterator of characters in the .env file format
+        and yield `Var` objects containing the dotenv variable 
+        names and values.
 
-    Raises a `DatadotenvParserError` for incorrectly formatted inputs.
-    
-    Parser implementation is scannerless with low memory overhead.
-    """
-    return _iter_vars_from_dotenv_chars(iter(chars))
+        The format rules try to follow those of `python-dotenv`.
+        See: https://pypi.org/project/python-dotenv/ -- Section: File format
 
+        Raises a `DatadotenvParserError` for incorrectly formatted inputs.
+        
+        Parser implementation is scannerless with low memory overhead.
+        """
+        return self._iter_vars_from_dotenv_chars(iter(chars))
 
-_PARSER_STATE_BEFORE_NAME = 0
-_PARSER_STATE_IN_UNQUOTED_NAME = 1
-_PARSER_STATE_IN_QUOTED_NAME = 2
-_PARSER_STATE_AFTER_NAME = 3
-_PARSER_STATE_BEFORE_VAL = 4
-_PARSER_STATE_IN_UNQUOTED_VAL = 5
-_PARSER_STATE_IN_DOUBLE_QUOTED_VAL = 6
-_PARSER_STATE_IN_SINGLE_QUOTED_VAL = 7
-_PARSER_STATE_AFTER_VAL = 8
-_PARSER_STATE_IN_COMMENT = 9
+    _DOTENV_STATE_BEFORE_NAME = 0
+    _DOTENV_STATE_IN_UNQUOTED_NAME = 1
+    _DOTENV_STATE_IN_QUOTED_NAME = 2
+    _DOTENV_STATE_AFTER_NAME = 3
+    _DOTENV_STATE_BEFORE_VAL = 4
+    _DOTENV_STATE_IN_UNQUOTED_VAL = 5
+    _DOTENV_STATE_IN_DOUBLE_QUOTED_VAL = 6
+    _DOTENV_STATE_IN_SINGLE_QUOTED_VAL = 7
+    _DOTENV_STATE_AFTER_VAL = 8
+    _DOTENV_STATE_IN_COMMENT = 9
 
+    def _iter_vars_from_dotenv_chars(
+            self,
+            chars: Iterator[str],
+    ) -> Iterator[tuple[str, str]]:
+        # Parse implementation tries to be compatible with python-dotenv.
+        # See: https://pypi.org/project/python-dotenv -- File format
 
-def _iter_vars_from_dotenv_chars(
-        chars: Iterator[str],
-) -> Iterator[tuple[str, str]]:
-    # Parse implementation tries to be compatible with python-dotenv.
-    # See: https://pypi.org/project/python-dotenv -- File format
+        name_chars: list[str] = []
+        val_chars: list[str] = []
+        state: int = self._DOTENV_STATE_BEFORE_NAME
+        
+        while True:
+            try:
+                char = next(chars)
+            except StopIteration:
+                break
 
-    name_chars: list[str] = []
-    val_chars: list[str] = []
-    state: int = _PARSER_STATE_BEFORE_NAME
-    
-    while True:
+            if state == self._DOTENV_STATE_BEFORE_NAME:
+                # Ignore line-breaks and whitespace
+                if char == "\n" or char == "\r" or char == " " or char == "\t" or char == "\v" or char == "\f":
+                    continue
+                if char == "#":
+                    state = self._DOTENV_STATE_IN_COMMENT
+                elif char == "'":
+                    state = self._DOTENV_STATE_IN_QUOTED_NAME
+                elif "A" <= char <= "Z" or "a" <= char <= "z":
+                    name_chars.append(char)
+                    state = self._DOTENV_STATE_IN_UNQUOTED_NAME
+                else:
+                    raise error.CannotParse(
+                        f"Unquoted dotenv variable names may only start with letters (A-Za-z), found '{char}'!"
+                    )
+            elif state == self._DOTENV_STATE_IN_UNQUOTED_NAME:
+                if char == "=":
+                    state = self._DOTENV_STATE_BEFORE_VAL
+                # TODO: Check how bash actually handles vertical tabs.
+                elif char == " " or char == "\t" or char == "\v":
+                    state = self._DOTENV_STATE_AFTER_NAME
+                elif char == "_" or "A" <= char <= "Z" or "0" <= char <= "9" or "a" <= char <= "z":
+                    name_chars.append(char)
+                else:
+                    raise error.CannotParse(
+                        f"Unquoted dotenv variable names may only contain letters, number and underscores (A-Za-z_), found '{char}'!"
+                    )
+            elif state == self._DOTENV_STATE_BEFORE_VAL:
+                # Allow empty values
+                if char == "\n" or char == "\r" or char == "\f":
+                    yield Var("".join(name_chars), None)
+                    name_chars.clear()
+                    state = self._DOTENV_STATE_BEFORE_NAME
+                elif char == '"':
+                    state = self._DOTENV_STATE_IN_DOUBLE_QUOTED_VAL
+                elif char == "'":
+                    state = self._DOTENV_STATE_IN_SINGLE_QUOTED_VAL
+                elif char == "#":
+                    yield Var("".join(name_chars), "")
+                    name_chars.clear()
+                    state = self._DOTENV_STATE_IN_COMMENT
+                elif char != " " and char != "\t" and char != "\v":
+                    val_chars.append(char)
+                    state = self._DOTENV_STATE_IN_UNQUOTED_VAL
+            elif state == self._DOTENV_STATE_IN_UNQUOTED_VAL:
+                if char == "\n" or char == "\r" or char == "\f":
+                    yield Var("".join(name_chars), "".join(val_chars))
+                    name_chars.clear()
+                    val_chars.clear()
+                    state = self._DOTENV_STATE_BEFORE_NAME
+                elif char == " " or char == "\t" or char == "\v":
+                    state = self._DOTENV_STATE_AFTER_VAL
+                else:
+                    val_chars.append(char)
+            elif state == self._DOTENV_STATE_IN_DOUBLE_QUOTED_VAL:
+                if char == '"':
+                    state = self._DOTENV_STATE_AFTER_VAL
+                elif char == "\\":
+                    escaped_char = next(chars)
+                    if escaped_char == "\"":
+                        val_chars.append('"')
+                    elif escaped_char == "n":
+                        val_chars.append("\n")
+                    elif escaped_char == "\\":
+                        val_chars.append("\\")
+                    elif escaped_char == "t":
+                        val_chars.append("\t")
+                    elif escaped_char == "'":
+                        val_chars.append("'")
+                    elif escaped_char == "r":
+                        val_chars.append("\r")
+                    elif escaped_char == "v":
+                        val_chars.append("\v")
+                    elif escaped_char == "f":
+                        val_chars.append("\f")
+                    elif escaped_char == "b":
+                        val_chars.append("\b")
+                    elif escaped_char == "a":
+                        val_chars.append("\a")
+                    else:
+                        raise error.CannotParse(
+                            f"Invalid escape sequence '\\{escaped_char}' inside double-quoted value!"
+                        )
+                else:
+                    val_chars.append(char)
+            elif state == self._DOTENV_STATE_IN_SINGLE_QUOTED_VAL:
+                if char == "'":
+                    state = self._DOTENV_STATE_AFTER_VAL
+                elif char == "\\":
+                    escaped_char = next(chars)
+                    if escaped_char == "'":
+                        val_chars.append("'")
+                    elif escaped_char == "\\":
+                        val_chars.append("\\")
+                    else:
+                        raise error.CannotParse(
+                            f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted value!"
+                        )
+                else:
+                    val_chars.append(char)
+            elif state == self._DOTENV_STATE_AFTER_VAL:
+                if char == "\n" or char == "\r" or char == "\f":
+                    yield Var("".join(name_chars), "".join(val_chars))
+                    name_chars.clear()
+                    val_chars.clear()
+                    state = self._DOTENV_STATE_BEFORE_NAME
+                elif char == "#":
+                    yield Var("".join(name_chars), "".join(val_chars))
+                    name_chars.clear()
+                    val_chars.clear()
+                    state = self._DOTENV_STATE_IN_COMMENT
+                elif char != " " and char != "\t" and char != "\v":
+                    raise error.CannotParse(
+                        f"Invalid non-whitespace character '{char}' after value ended!"
+                    )
+            elif state == self._DOTENV_STATE_IN_COMMENT:
+                if char == "\n" or char == "\r" or char == "\f":
+                    state = self._DOTENV_STATE_BEFORE_NAME
+            elif state == self._DOTENV_STATE_AFTER_NAME:
+                if char == "=":
+                    state = self._DOTENV_STATE_BEFORE_VAL
+                elif char != " " and char != "\t" and char != "\v":
+                    raise error.CannotParse(
+                        f"Invalid non-whitespace character '{char}' after name and before '='!"
+                    )
+            elif state == self._DOTENV_STATE_IN_QUOTED_NAME:
+                if char == "'":
+                    state = self._DOTENV_STATE_AFTER_NAME
+                elif char == "\\":
+                    escaped_char = next(chars)
+                    if escaped_char == "'":
+                        name_chars.append("'")
+                    elif escaped_char == "\\":
+                        name_chars.append("\\")
+                    else:
+                        raise error.CannotParse(
+                            f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted name!"
+                        )
+                else:
+                    name_chars.append(char)
+            else:
+                raise RuntimeError(
+                    f"Unhandled parser state={state}"
+                )
+
+        if state == self._DOTENV_STATE_IN_UNQUOTED_VAL or state == self._DOTENV_STATE_AFTER_VAL:
+            yield Var("".join(name_chars), "".join(val_chars))
+        # Allow empty values
+        elif state == self._DOTENV_STATE_BEFORE_VAL:
+            yield Var("".join(name_chars), None)
+        elif state != self._DOTENV_STATE_BEFORE_NAME:
+            raise error.CannotParse(
+                "Input ended with unterminated name or value!"
+            )
+                    
+        # Hopefully help garbage collector
+        del name_chars
+        del val_chars
+
+    _TIMEDELTA_ORD_WEEKS = 1
+    _TIMEDELTA_ORD_DAYS = 2
+    _TIMEDELTA_ORD_HOURS = 3
+    _TIMEDELTA_ORD_MINUTES = 4
+    _TIMEDELTA_ORD_SECONDS = 5
+    _TIMEDELTA_ORD_MILLISECONDS = 6
+    _TIMEDELTA_ORD_MICROSECONDS = 7
+
+    def timedelta(self, s: str) -> datetime.timedelta:
+        blank_err = error.CannotParse("Got blank input for timedelta!")
+        default_err = error.CannotParse(
+            f"Invalid timedelta input '{s}'. "
+            "Input must contain a sequence of at least one number, "
+            "followed by 'w', 'd', 'h', 'm', 's' or 'μs'/'us' "
+            "where units cannot duplicate and larger ones must occur before smaller ones, "
+            "optionally delimited by whitespaces, tabs or single commas!"
+        )
+
+        # Tokenize input
+        tokens: list[str] = []
+        token_chars: list[str] = []
+        chars = iter(s)
         try:
             char = next(chars)
         except StopIteration:
-            break
+            raise blank_err
+        last_was_comma: bool = False
+        while True:
+            # Skip leading whitespace
+            exit_outer_loop = False
+            while char == " " or char == "\t" or char == "\v":
+                try:
+                    char = next(chars)
+                except StopIteration:
+                    exit_outer_loop = True
+                    break
+            if exit_outer_loop:
+                break
 
-        if state == _PARSER_STATE_BEFORE_NAME:
-            # Ignore line-breaks and whitespace
-            if char == "\n" or char == "\r" or char == " " or char == "\t" or char == "\v" or char == "\f":
-                continue
-            if char == "#":
-                state = _PARSER_STATE_IN_COMMENT
-            elif char == "'":
-                state = _PARSER_STATE_IN_QUOTED_NAME
-            elif "A" <= char <= "Z" or "a" <= char <= "z":
-                name_chars.append(char)
-                state = _PARSER_STATE_IN_UNQUOTED_NAME
-            else:
-                raise error.CannotParse(
-                    f"Unquoted dotenv variable names may only start with letters (A-Za-z), found '{char}'!"
-                )
-        elif state == _PARSER_STATE_IN_UNQUOTED_NAME:
-            if char == "=":
-                state = _PARSER_STATE_BEFORE_VAL
-            # TODO: Check how bash actually handles vertical tabs.
-            elif char == " " or char == "\t" or char == "\v":
-                state = _PARSER_STATE_AFTER_NAME
-            elif char == "_" or "A" <= char <= "Z" or "0" <= char <= "9" or "a" <= char <= "z":
-                name_chars.append(char)
-            else:
-                raise error.CannotParse(
-                    f"Unquoted dotenv variable names may only contain letters, number and underscores (A-Za-z_), found '{char}'!"
-                )
-        elif state == _PARSER_STATE_BEFORE_VAL:
-            # Allow empty values
-            if char == "\n" or char == "\r" or char == "\f":
-                yield Var("".join(name_chars), None)
-                name_chars.clear()
-                state = _PARSER_STATE_BEFORE_NAME
-            elif char == '"':
-                state = _PARSER_STATE_IN_DOUBLE_QUOTED_VAL
-            elif char == "'":
-                state = _PARSER_STATE_IN_SINGLE_QUOTED_VAL
-            elif char == "#":
-                yield Var("".join(name_chars), "")
-                name_chars.clear()
-                state = _PARSER_STATE_IN_COMMENT
-            elif char != " " and char != "\t" and char != "\v":
-                val_chars.append(char)
-                state = _PARSER_STATE_IN_UNQUOTED_VAL
-        elif state == _PARSER_STATE_IN_UNQUOTED_VAL:
-            if char == "\n" or char == "\r" or char == "\f":
-                yield Var("".join(name_chars), "".join(val_chars))
-                name_chars.clear()
-                val_chars.clear()
-                state = _PARSER_STATE_BEFORE_NAME
-            elif char == " " or char == "\t" or char == "\v":
-                state = _PARSER_STATE_AFTER_VAL
-            else:
-                val_chars.append(char)
-        elif state == _PARSER_STATE_IN_DOUBLE_QUOTED_VAL:
-            if char == '"':
-                state = _PARSER_STATE_AFTER_VAL
-            elif char == "\\":
-                escaped_char = next(chars)
-                if escaped_char == "\"":
-                    val_chars.append('"')
-                elif escaped_char == "n":
-                    val_chars.append("\n")
-                elif escaped_char == "\\":
-                    val_chars.append("\\")
-                elif escaped_char == "t":
-                    val_chars.append("\t")
-                elif escaped_char == "'":
-                    val_chars.append("'")
-                elif escaped_char == "r":
-                    val_chars.append("\r")
-                elif escaped_char == "v":
-                    val_chars.append("\v")
-                elif escaped_char == "f":
-                    val_chars.append("\f")
-                elif escaped_char == "b":
-                    val_chars.append("\b")
-                elif escaped_char == "a":
-                    val_chars.append("\a")
-                else:
-                    raise error.CannotParse(
-                        f"Invalid escape sequence '\\{escaped_char}' inside double-quoted value!"
-                    )
-            else:
-                val_chars.append(char)
-        elif state == _PARSER_STATE_IN_SINGLE_QUOTED_VAL:
-            if char == "'":
-                state = _PARSER_STATE_AFTER_VAL
-            elif char == "\\":
-                escaped_char = next(chars)
-                if escaped_char == "'":
-                    val_chars.append("'")
-                elif escaped_char == "\\":
-                    val_chars.append("\\")
-                else:
-                    raise error.CannotParse(
-                        f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted value!"
-                    )
-            else:
-                val_chars.append(char)
-        elif state == _PARSER_STATE_AFTER_VAL:
-            if char == "\n" or char == "\r" or char == "\f":
-                yield Var("".join(name_chars), "".join(val_chars))
-                name_chars.clear()
-                val_chars.clear()
-                state = _PARSER_STATE_BEFORE_NAME
-            elif char == "#":
-                yield Var("".join(name_chars), "".join(val_chars))
-                name_chars.clear()
-                val_chars.clear()
-                state = _PARSER_STATE_IN_COMMENT
-            elif char != " " and char != "\t" and char != "\v":
-                raise error.CannotParse(
-                    f"Invalid non-whitespace character '{char}' after value ended!"
-                )
-        elif state == _PARSER_STATE_IN_COMMENT:
-            if char == "\n" or char == "\r" or char == "\f":
-                state = _PARSER_STATE_BEFORE_NAME
-        elif state == _PARSER_STATE_AFTER_NAME:
-            if char == "=":
-                state = _PARSER_STATE_BEFORE_VAL
-            elif char != " " and char != "\t" and char != "\v":
-                raise error.CannotParse(
-                    f"Invalid non-whitespace character '{char}' after name and before '='!"
-                )
-        elif state == _PARSER_STATE_IN_QUOTED_NAME:
-            if char == "'":
-                state = _PARSER_STATE_AFTER_NAME
-            elif char == "\\":
-                escaped_char = next(chars)
-                if escaped_char == "'":
-                    name_chars.append("'")
-                elif escaped_char == "\\":
-                    name_chars.append("\\")
-                else:
-                    raise error.CannotParse(
-                        f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted name!"
-                    )
-            else:
-                name_chars.append(char)
-        else:
-            raise RuntimeError(
-                f"Unhandled parser state={state}"
-            )
+            # Put number in token
+            exit_outer_loop = False
+            while "0" <= char <= "9" or char == "-" or char == "." or char == "e" or char == "E":
+                token_chars.append(char)
+                try:
+                    char = next(chars)
+                except StopIteration:
+                    exit_outer_loop = True
+                    break
+            if not token_chars:
+                raise default_err
+            tokens.append("".join(token_chars))
+            token_chars.clear()
+            if exit_outer_loop:
+                break
+            
+            # Put unit in token
+            exit_outer_loop = False
+            while char == "s" or char == "m" or char == "h" or char == "d" or char == "w" or char == "u" or char == "μ":
+                token_chars.append(char)
+                try:
+                    char = next(chars)
+                except StopIteration:
+                    exit_outer_loop = True
+                    break
+            if not token_chars:
+                raise default_err
+            tokens.append("".join(token_chars))
+            token_chars.clear()
+            if exit_outer_loop:
+                break
 
-    if state == _PARSER_STATE_IN_UNQUOTED_VAL or state == _PARSER_STATE_AFTER_VAL:
-        yield Var("".join(name_chars), "".join(val_chars))
-    # Allow empty values
-    elif state == _PARSER_STATE_BEFORE_VAL:
-        yield Var("".join(name_chars), None)
-    elif state != _PARSER_STATE_BEFORE_NAME:
-        raise error.CannotParse(
-            "Input ended with unterminated name or value!"
+            last_was_comma = False
+            
+            # Skip trailing whitespace
+            exit_outer_loop = False
+            while char == " " or char == "\t" or char == "\v":
+                try:
+                    char = next(chars)
+                except StopIteration:
+                    exit_outer_loop = True
+                    break
+            if exit_outer_loop:
+                break
+
+            # Skip trailing comma
+            if char == ",":
+                try:
+                    char = next(chars)
+                except StopIteration:
+                    last_was_comma = True
+                    break
+
+        if not tokens:
+            raise blank_err
+
+        if last_was_comma:
+            raise default_err
+
+        # Parse tokens
+        weeks = 0
+        days = 0
+        hours = 0
+        minutes = 0
+        seconds = 0
+        milliseconds = 0
+        microseconds = 0
+        ord = 0
+        num: int | None = None
+        for token in tokens:
+            if num is None:
+                try:
+                    num = float(token)
+                except ValueError:
+                    raise default_err
+            else:
+                if token == "s":
+                    if ord >= self._TIMEDELTA_ORD_SECONDS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_SECONDS
+                    seconds = num
+                    num = None
+                elif token == "m":
+                    if ord >= self._TIMEDELTA_ORD_MINUTES:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_MINUTES
+                    minutes = num
+                    num = None
+                elif token == "h":
+                    if ord >= self._TIMEDELTA_ORD_HOURS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_HOURS
+                    hours = num
+                    num = None
+                elif token == "d":
+                    if ord >= self._TIMEDELTA_ORD_DAYS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_DAYS
+                    days = num
+                    num = None
+                elif token == "w":
+                    if ord >= self._TIMEDELTA_ORD_WEEKS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_WEEKS
+                    weeks = num
+                    num = None
+                elif token == "ms":
+                    if ord >= self._TIMEDELTA_ORD_MILLISECONDS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_MILLISECONDS
+                    milliseconds = num
+                    num = None
+                elif token == "us" or token == "μs":
+                    if ord >= self._TIMEDELTA_ORD_MICROSECONDS:
+                        raise default_err
+                    ord = self._TIMEDELTA_ORD_MICROSECONDS
+                    microseconds = num
+                    num = None
+                else:
+                    raise default_err
+        
+        return datetime.timedelta(
+            weeks=weeks,
+            days=days,
+            hours=hours,
+            minutes=minutes,
+            seconds=seconds,
+            milliseconds=milliseconds,
+            microseconds=microseconds,
         )
-                
-    # Hopefully help garbage collector
-    del name_chars
-    del val_chars
 
 
 def _transform_case(transformation: Literal["upper"], s: str) -> str:
@@ -754,6 +951,7 @@ class _Error:
         pass
 
 
+parse = _Parse()
 error = _Error()
 
 datadotenv = _Datadotenv()

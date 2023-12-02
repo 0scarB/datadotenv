@@ -1,11 +1,12 @@
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Optional, Union
 import unittest
 from unittest import TestCase
 
 
-from src import datadotenv, iter_vars_from_dotenv_chars, Var
+from src import datadotenv, parse, Var
 
 
 class TestDatadotenv(TestCase):
@@ -200,6 +201,68 @@ class TestDatadotenv(TestCase):
             MyDotenv(file_path=Path("./non-existent").resolve())
         )
 
+    def test_handles_dataclasses_with_datetimes(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            time: datetime
+        
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                'TIME="1989-11-09 19:00"'
+            ])),
+            MyDotenv(datetime(year=1989, month=11, day=9, hour=19)),
+        )
+
+        with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
+            datadotenv(MyDotenv).from_str("\n".join([
+                'TIME="198x-11-09 19:00"'
+            ])),
+        self.assertEqual(
+            str(err_ctx.exception), 
+            "Cannot parse datetime: Invalid isoformat string: '198x-11-09 19:00'"
+        )
+        
+    def test_handles_dataclasses_with_dates(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            day: date
+        
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                'DAY="1989-11-09"'
+            ])),
+            MyDotenv(date(year=1989, month=11, day=9)),
+        )
+
+        with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
+            datadotenv(MyDotenv).from_str("\n".join([
+                'DAY="198x-11-09"'
+            ])),
+        self.assertEqual(
+            str(err_ctx.exception), 
+            "Cannot parse date: Invalid isoformat string: '198x-11-09'"
+        )
+
+    def test_handles_dataclasses_with_timedeltas(self):
+        
+        @dataclass(frozen=True)
+        class MyDotenv:
+            delta: timedelta
+        
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                'DELTA="1h 30m"'
+            ])),
+            MyDotenv(timedelta(hours=1, minutes=30)),
+        )
+
+        with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
+            datadotenv(MyDotenv).from_str("\n".join([
+                'DELTA="1h 30n"'
+            ])),
+
     def test_supports_different_casing_options(self):
 
         @dataclass(frozen=True)
@@ -298,162 +361,162 @@ class TestDatadotenv(TestCase):
         )
 
 
-class TestIterNameValuesFromChars(TestCase):
+class TestParseDotenvFromCharsIter(TestCase):
 
     def test_parses_unquoted_key_value_pair(self):
-        it = iter_vars_from_dotenv_chars("KEY=value")
+        it = parse.dotenv_from_chars_iter("KEY=value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("key=value")
+        it = parse.dotenv_from_chars_iter("key=value")
         self.assertEqual(next(it), Var("key", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY1=value")
+        it = parse.dotenv_from_chars_iter("KEY1=value")
         self.assertEqual(next(it), Var("KEY1", "value"))
 
-        it = iter_vars_from_dotenv_chars("KEY =value")
+        it = parse.dotenv_from_chars_iter("KEY =value")
         self.assertEqual(next(it), Var("KEY", "value"))
 
-        it = iter_vars_from_dotenv_chars("KEY= value")
+        it = parse.dotenv_from_chars_iter("KEY= value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY = value")
+        it = parse.dotenv_from_chars_iter("KEY = value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY\t=\t\tvalue")
+        it = parse.dotenv_from_chars_iter("KEY\t=\t\tvalue")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars(" KEY=value")
+        it = parse.dotenv_from_chars_iter(" KEY=value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("\tKEY=value")
+        it = parse.dotenv_from_chars_iter("\tKEY=value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("\nKEY=value")
+        it = parse.dotenv_from_chars_iter("\nKEY=value")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY=value ")
+        it = parse.dotenv_from_chars_iter("KEY=value ")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY=value\t")
+        it = parse.dotenv_from_chars_iter("KEY=value\t")
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars("KEY=value\n")
+        it = parse.dotenv_from_chars_iter("KEY=value\n")
         self.assertEqual(next(it), Var("KEY", "value"))
 
     def test_parses_doubly_quoted_values(self):
-        it = iter_vars_from_dotenv_chars('KEY="value"')
+        it = parse.dotenv_from_chars_iter('KEY="value"')
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars('KEY=" value"')
+        it = parse.dotenv_from_chars_iter('KEY=" value"')
         self.assertEqual(next(it), Var("KEY", " value"))
         
-        it = iter_vars_from_dotenv_chars('KEY="value "')
+        it = parse.dotenv_from_chars_iter('KEY="value "')
         self.assertEqual(next(it), Var("KEY", "value "))
         
-        it = iter_vars_from_dotenv_chars('KEY= "value"')
+        it = parse.dotenv_from_chars_iter('KEY= "value"')
         self.assertEqual(next(it), Var("KEY", "value"))
         
-        it = iter_vars_from_dotenv_chars('KEY="value" ')
-        self.assertEqual(next(it), Var("KEY", "value"))
-
-        it = iter_vars_from_dotenv_chars('KEY="value with \'single-quotes\'"')
-        self.assertEqual(next(it), Var("KEY", "value with 'single-quotes'"))
-        
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \"double-quotes\""')
-        self.assertEqual(next(it), Var("KEY", 'value with escaped "double-quotes"'))
-        
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \nnewline"')
-        self.assertEqual(next(it), Var("KEY", "value with escaped \nnewline"))
-        
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped\ttab"')
-        self.assertEqual(next(it), Var("KEY", "value with escaped\ttab"))
-        
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \\ backslash"')
-        self.assertEqual(next(it), Var("KEY", "value with escaped \\ backslash"))
-        
-        it = iter_vars_from_dotenv_chars('KEY= "value"')
-        self.assertEqual(next(it), Var("KEY", "value"))
-        
-        it = iter_vars_from_dotenv_chars('KEY="value" ')
+        it = parse.dotenv_from_chars_iter('KEY="value" ')
         self.assertEqual(next(it), Var("KEY", "value"))
 
-        it = iter_vars_from_dotenv_chars('KEY="value with \'single-quotes\'"')
+        it = parse.dotenv_from_chars_iter('KEY="value with \'single-quotes\'"')
         self.assertEqual(next(it), Var("KEY", "value with 'single-quotes'"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \"double-quotes\""')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \"double-quotes\""')
         self.assertEqual(next(it), Var("KEY", 'value with escaped "double-quotes"'))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \nnewline"')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \nnewline"')
         self.assertEqual(next(it), Var("KEY", "value with escaped \nnewline"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped\ttab"')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped\ttab"')
         self.assertEqual(next(it), Var("KEY", "value with escaped\ttab"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \\ backslash"')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \\ backslash"')
         self.assertEqual(next(it), Var("KEY", "value with escaped \\ backslash"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \' single-quote"')
+        it = parse.dotenv_from_chars_iter('KEY= "value"')
+        self.assertEqual(next(it), Var("KEY", "value"))
+        
+        it = parse.dotenv_from_chars_iter('KEY="value" ')
+        self.assertEqual(next(it), Var("KEY", "value"))
+
+        it = parse.dotenv_from_chars_iter('KEY="value with \'single-quotes\'"')
+        self.assertEqual(next(it), Var("KEY", "value with 'single-quotes'"))
+        
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \"double-quotes\""')
+        self.assertEqual(next(it), Var("KEY", 'value with escaped "double-quotes"'))
+        
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \nnewline"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \nnewline"))
+        
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped\ttab"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped\ttab"))
+        
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \\ backslash"')
+        self.assertEqual(next(it), Var("KEY", "value with escaped \\ backslash"))
+        
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \' single-quote"')
         self.assertEqual(next(it), Var("KEY", "value with escaped ' single-quote"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \r\nCR LF"')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \r\nCR LF"')
         self.assertEqual(next(it), Var("KEY", "value with escaped \r\nCR LF"))
         
-        it = iter_vars_from_dotenv_chars(r'KEY="value with escaped \r\nCR LF"')
+        it = parse.dotenv_from_chars_iter(r'KEY="value with escaped \r\nCR LF"')
         self.assertEqual(next(it), Var("KEY", "value with escaped \r\nCR LF"))
 
     def test_parses_singly_quoted_values(self):
-        it = iter_vars_from_dotenv_chars("KEY='value'")
+        it = parse.dotenv_from_chars_iter("KEY='value'")
         self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_vars_from_dotenv_chars("KEY=' value'")
+        it = parse.dotenv_from_chars_iter("KEY=' value'")
         self.assertEqual(next(it), Var("KEY", " value")) 
         
-        it = iter_vars_from_dotenv_chars("KEY='value '")
+        it = parse.dotenv_from_chars_iter("KEY='value '")
         self.assertEqual(next(it), Var("KEY", "value ")) 
         
-        it = iter_vars_from_dotenv_chars("KEY= 'value'")
+        it = parse.dotenv_from_chars_iter("KEY= 'value'")
         self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_vars_from_dotenv_chars("KEY='value' ")
+        it = parse.dotenv_from_chars_iter("KEY='value' ")
         self.assertEqual(next(it), Var("KEY", "value")) 
         
-        it = iter_vars_from_dotenv_chars(r"KEY='value with escaped backslash \\'")
+        it = parse.dotenv_from_chars_iter(r"KEY='value with escaped backslash \\'")
         self.assertEqual(next(it), Var("KEY", "value with escaped backslash \\")) 
         
-        it = iter_vars_from_dotenv_chars(r"KEY='value with escaped quote \''")
+        it = parse.dotenv_from_chars_iter(r"KEY='value with escaped quote \''")
         self.assertEqual(next(it), Var("KEY", "value with escaped quote '")) 
 
     def test_parses_unset_values(self):
-        it = iter_vars_from_dotenv_chars("KEY=")
+        it = parse.dotenv_from_chars_iter("KEY=")
         self.assertEqual(next(it), Var("KEY", None))
         
-        it = iter_vars_from_dotenv_chars("KEY= ")
+        it = parse.dotenv_from_chars_iter("KEY= ")
         self.assertEqual(next(it), Var("KEY", None))
         
-        it = iter_vars_from_dotenv_chars("KEY=\t")
+        it = parse.dotenv_from_chars_iter("KEY=\t")
         self.assertEqual(next(it), Var("KEY", None))
         
-        it = iter_vars_from_dotenv_chars("KEY=\n")
+        it = parse.dotenv_from_chars_iter("KEY=\n")
         self.assertEqual(next(it), Var("KEY", None))
         
-        it = iter_vars_from_dotenv_chars("KEY=\t\n")
+        it = parse.dotenv_from_chars_iter("KEY=\t\n")
         self.assertEqual(next(it), Var("KEY", None))
 
     def test_parses_empty_strings(self):
-        it = iter_vars_from_dotenv_chars('KEY=""')
+        it = parse.dotenv_from_chars_iter('KEY=""')
         self.assertEqual(next(it), Var("KEY", ""))
 
     def test_parses_blank_lines_and_empty_string(self):
-        it = iter_vars_from_dotenv_chars("")
+        it = parse.dotenv_from_chars_iter("")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_vars_from_dotenv_chars("\n")
+        it = parse.dotenv_from_chars_iter("\n")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_vars_from_dotenv_chars("\t")
+        it = parse.dotenv_from_chars_iter("\t")
         self.assertEqual(len(list(it)), 0)
         
-        it = iter_vars_from_dotenv_chars("\n".join([
+        it = parse.dotenv_from_chars_iter("\n".join([
             "",
             "KEY1=value1",
             "",
@@ -468,7 +531,7 @@ class TestIterNameValuesFromChars(TestCase):
         self.assertEqual(next(it), Var("KEY3", "value3"))
 
     def test_parses_multiple_key_value_pairs(self):
-        it = iter_vars_from_dotenv_chars("\n".join([
+        it = parse.dotenv_from_chars_iter("\n".join([
             "KEY1=value1",
             "KEY2=value2",
             'KEY3="value3"',
@@ -482,7 +545,7 @@ class TestIterNameValuesFromChars(TestCase):
         self.assertEqual(next(it), Var("KEY5", "value5"))
 
     def test_parses_comments(self):
-        it = iter_vars_from_dotenv_chars("\n".join([
+        it = parse.dotenv_from_chars_iter("\n".join([
             "KEY1=value1",
             "# Comment on separate line",
             "KEY2=value2 # Comment after unquoted value",
@@ -496,6 +559,68 @@ class TestIterNameValuesFromChars(TestCase):
         self.assertEqual(next(it), Var("KEY4", "value4"))
         self.assertEqual(next(it), Var("KEY5", ""))
 
+
+class TestParseTimedelta(TestCase):
+
+    def test_success_cases(self):
+        for s, delta in [
+            # Common cases
+            ("1ms", timedelta(milliseconds=1)),
+            ("100ms", timedelta(milliseconds=100)),
+            ("500ms", timedelta(milliseconds=500)),
+            ("1s", timedelta(seconds=1)),
+            ("-1s", timedelta(seconds=-1)),
+            ("5s", timedelta(seconds=5)),
+            ("10s", timedelta(seconds=10)),
+            ("20s", timedelta(seconds=20)),
+            ("30s", timedelta(seconds=30)),
+            ("60s", timedelta(seconds=60)),
+            ("0.5s", timedelta(milliseconds=500)),
+            (".5s", timedelta(milliseconds=500)),
+            ("1m", timedelta(minutes=1)),
+            ("10m", timedelta(minutes=10)),
+            ("15m", timedelta(minutes=15)),
+            ("20m", timedelta(minutes=20)),
+            ("30m", timedelta(minutes=30)),
+            ("45m", timedelta(minutes=45)),
+            ("1h", timedelta(hours=1)),
+            ("2h", timedelta(hours=2)),
+            ("6h", timedelta(hours=6)),
+            ("12h", timedelta(hours=12)),
+            ("24h", timedelta(days=1)),
+            ("48h", timedelta(days=2)),
+            ("72h", timedelta(days=3)),
+            ("0.5h", timedelta(minutes=30)),
+            (".5h", timedelta(minutes=30)),
+            ("1.5h", timedelta(hours=1, minutes=30)),
+            ("1h30m", timedelta(hours=1, minutes=30)),
+            ("1h 30m", timedelta(hours=1, minutes=30)),
+            ("2d12h", timedelta(days=2, hours=12)),
+            ("2d 12h", timedelta(days=2, hours=12)),
+            ("2d12h30m", timedelta(days=2, hours=12, minutes=30)),
+            ("2d 12h 30m", timedelta(days=2, hours=12, minutes=30)),
+            ("2d,12h 30m", timedelta(days=2, hours=12, minutes=30)),
+            # Exhaustive cases
+            ("1w2d3h4m5s6ms7us", timedelta(weeks=1, days=2, hours=3, minutes=4, seconds=5, milliseconds=6, microseconds=7)),
+            (" 1w 2d, 3h ,4m , 5s\t6ms  7us\t", timedelta(weeks=1, days=2, hours=3, minutes=4, seconds=5, milliseconds=6, microseconds=7)),
+        ]:
+            self.assertEqual(
+                parse.timedelta(s), delta
+            )
+            
+    def test_failure_cases(self):
+        for s in [
+            "",
+            "1s,",
+            ",1s",
+            "1 s",
+            "1. s",
+            "1. 5s",
+        ]:
+            with self.assertRaises(datadotenv.error.CannotParse):
+                parse.timedelta(s)
+
+            
 
 if __name__ == "__main__":
     unittest.main()
