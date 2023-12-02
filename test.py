@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 import unittest
 from unittest import TestCase
 
 
-from src import DatadotenvNotInDataclassError, datadotenv, iter_vars_from_dotenv_chars, Var
+from src import datadotenv, iter_vars_from_dotenv_chars, Var
 
 
 class TestDatadotenv(TestCase):
@@ -109,6 +110,42 @@ class TestDatadotenv(TestCase):
             )
         )
 
+    def test_handles_dataclasses_with_file_paths(self):
+        
+        @dataclass(frozen=True)
+        class MyDotenv:
+            file_path: Path
+
+        # Test raises when non-existent by default
+        with self.assertRaises(datadotenv.error.FilePathDoesNotExist):
+            datadotenv(MyDotenv).from_str("\n".join([
+                'FILE_PATH=./non-existent'
+            ]))
+
+        # Test resolves path by default
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                'FILE_PATH=./src/../src'
+            ])),
+            MyDotenv(Path("./src").resolve())
+        )
+
+        # Test option not not resolve 
+        self.assertEqual(
+            datadotenv(MyDotenv, resolve_file_paths=False).from_str("\n".join([
+                'FILE_PATH=./src'
+            ])),
+            MyDotenv(Path("./src"))
+        )
+
+        # Test option to not check existence
+        self.assertAlmostEqual(
+            datadotenv(MyDotenv, file_paths_must_exist=False).from_str("\n".join([
+                'FILE_PATH=./non-existent'
+            ])),
+            MyDotenv(file_path=Path("./non-existent").resolve())
+        )
+
     def test_supports_different_casing_options(self):
 
         @dataclass(frozen=True)
@@ -183,25 +220,19 @@ class TestDatadotenv(TestCase):
             var: str
 
         # Test default: dataclass must fully describe dotenv
-        with self.assertRaises(DatadotenvNotInDataclassError):
-            self.assertEqual(
-                datadotenv(MyDotenv).from_str("\n".join([
-                    'VAR=foo',
-                    'NOT_DESCRIBED_IN_DATACLASS=bar',
-                ])),
-                MyDotenv(var="foo")
-            )
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            datadotenv(MyDotenv).from_str("\n".join([
+                'VAR=foo',
+                'NOT_DESCRIBED_IN_DATACLASS=bar',
+            ])),
             
         # Test explicit: dataclass must fully describe dotenv
         # using `allow_incomplete=False`
-        with self.assertRaises(DatadotenvNotInDataclassError):
-            self.assertEqual(
-                datadotenv(MyDotenv, allow_incomplete=False).from_str("\n".join([
-                    'VAR=foo',
-                    'NOT_DESCRIBED_IN_DATACLASS=bar',
-                ])),
-                MyDotenv(var="foo")
-            )
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            datadotenv(MyDotenv, allow_incomplete=False).from_str("\n".join([
+                'VAR=foo',
+                'NOT_DESCRIBED_IN_DATACLASS=bar',
+            ]))
 
         # Test can accept incomplete dataclass with `allow_incomplete=True` 
         self.assertEqual(

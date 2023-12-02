@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from pathlib import Path
 import types
 import typing
 from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Literal, Protocol, Type, TypeAlias, TypeVar
@@ -21,39 +22,60 @@ _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 _Casing: TypeAlias = Literal["upper", "lower", "preserve", "ignore"]
 
 
-def datadotenv(
-    datacls: Type[_TDataclass],
-    /, *,
-    case: _Casing = "upper",
-    allow_incomplete: bool = False,
-) -> _Spec[_TDataclass]:
-    
-    def placeholder_validate_and_convert(_: Var) -> Any:
-        raise RuntimeError(
-            f"{_VarSpecSingleton.validate_and_convert.__qualname__} "
-            f"must be set by {_mut_var_spec_for_type.__qualname__}!"
+class _Datadotenv:
+    error: _Error
+
+    def __call__(
+        self,
+        datacls: Type[_TDataclass],
+        /, *,
+        case: _Casing = "upper",
+        allow_incomplete: bool = False,
+        file_paths_must_exist: bool = True,
+        resolve_file_paths: bool = True,
+    ) -> _Spec[_TDataclass]:
+        
+        def placeholder_validate_and_convert(_: Var) -> Any:
+            raise RuntimeError(
+                f"{_VarSpecSingleton.validate_and_convert.__qualname__} "
+                f"must be set by {_mut_var_spec_for_type.__qualname__}!"
+            )
+
+        var_specs: list[_VarSpec] = []
+        for field in dataclasses.fields(datacls):
+            var_spec = _VarSpecSingleton(
+                dataclass_field_name=field.name,
+                dotenv_var_name=_transform_case(case, field.name),
+                default=field.default,
+                validate_and_convert=placeholder_validate_and_convert,
+                target_strategy=_VarSpecTargetByName(
+                    name=_transform_case(case, field.name),
+                    ignore_case=case == "ignore",
+                ),
+                file_path_config=_VarSpecFilePathConfig(
+                    resolve=resolve_file_paths,
+                    must_exist=file_paths_must_exist,
+                )
+            )
+            _mut_var_spec_for_type(var_spec, field.type)
+            var_specs.append(var_spec)
+
+        return _Spec(
+            datacls, 
+            var_specs,
+            allow_incomplete=allow_incomplete,
         )
 
-    var_specs: list[_VarSpec] = []
-    for field in dataclasses.fields(datacls):
-        var_spec = _VarSpecSingleton(
-            dataclass_field_name=field.name,
-            dotenv_var_name=_transform_case(case, field.name),
-            default=field.default,
-            target_strategy=_VarSpecTargetByName(
-                name=_transform_case(case, field.name),
-                ignore_case=case == "ignore",
-            ),
-            validate_and_convert=placeholder_validate_and_convert,
-        )
-        _mut_var_spec_for_type(var_spec, field.type)
-        var_specs.append(var_spec)
-
-    return _Spec(
-        datacls, 
-        var_specs,
-        allow_incomplete=allow_incomplete,
-    )
+    def open_docs(self) -> None:
+        """Opens the documentation in your browser."""
+        url = "https://github.com/0scarB/datadotenv/tree/main"
+        if not _check_system_supports_python_webbrowser():
+            raise RuntimeError(
+                "Could not open documentation URL in browser. "
+                f"Manually visit {url}"
+            )
+        import webbrowser
+        webbrowser.open(url)
 
 
 def _mut_var_spec_for_type(var_spec: _VarSpec, type_: Any) -> None:
@@ -82,15 +104,17 @@ def _choose_validator_and_converter(
         return _validate_and_convert_unset
     elif getattr(type_, "__name__") == "Literal":
         return _create_validate_and_convert_literal(var_spec, type_)
+    elif issubclass(type_, Path):
+        return _create_validate_and_convert_file_path(var_spec)
     else:
-        raise DatadotenvNotImplementedError(
+        raise error.NotImplemented(
             f"No handling for type of dataclass field '{var_spec.dataclass_field_name}: {type_.__name__}'!"
         )
 
 
 def _validate_and_convert_str(env_var: Var) -> str:
     if env_var.value is None:
-        raise DatadotenvUnsetError(
+        raise error.VariableUnset(
             f"Dotenv variable '{env_var.name}' was expected to be set!"
         )
 
@@ -104,7 +128,7 @@ def _validate_and_convert_bool(var: Var) -> bool:
     elif str_value == "false" or str_value == "False":
         return False
 
-    raise DatadotenvConversionError(
+    raise error.CannotConvertToType(
         f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'bool'!"
     )
 
@@ -114,7 +138,7 @@ def _validate_and_convert_int(var: Var) -> bool:
     try:
         return int(str_value)
     except ValueError:
-        raise DatadotenvConversionError(
+        raise error.CannotConvertToType(
             f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'int'!"
         )
 
@@ -124,7 +148,7 @@ def _validate_and_convert_float(var: Var) -> bool:
     try:
         return float(str_value)
     except ValueError:
-        raise DatadotenvConversionError(
+        raise error.CannotConvertToType(
             f"Failed to convert dotenv variable {var.name}='{var.value}' to type 'float'!"
         )
 
@@ -133,7 +157,7 @@ def _validate_and_convert_unset(var: Var) -> None:
     if var.value is None:
         return None
 
-    raise DatadotenvConversionError(
+    raise error.CannotConvertToType(
         f"Expected dotenv varibale '{var.name}' to be unset, not '{var.value}'!"
     )
 
@@ -150,18 +174,36 @@ def _create_validate_and_convert_literal(
             try:
                 if option == f(env_var):
                     return option
-            except DatadotenvNotImplementedError as err:
+            except NotImplemented as err:
                 raise err
-            except DatadotenvError:
+            except error.Error:
                 pass
         
         options_str = ", ".join(f"'{option}'" for option in options)
-        raise DatadotenvConversionError(
+        raise error.CannotConvertToType(
             f"Expected dotenv variable '{env_var.name}' to be one of {options_str}, not '{env_var.value}'!"
         )
 
     return validate_and_convert
 
+
+def _create_validate_and_convert_file_path(
+        var_spec: _VarSpec,
+) -> Callable[[Var], Path]:
+    
+    def validate_and_convert(var: Var) -> Path:
+        file_path = Path(var.value)
+        if var_spec.file_path_config.resolve:
+            file_path = Path.resolve(file_path)
+        if var_spec.file_path_config.must_exist:
+            if not file_path.exists():
+                raise error.FilePathDoesNotExist(
+                    f"Expected path '{file_path}' "
+                    f"set by dotenv variable '{var_spec.dotenv_var_name}' to exist!"
+                )
+        return file_path
+    
+    return validate_and_convert
 
 
 @dataclass
@@ -180,11 +222,18 @@ _VarSpecTargetStrategy: TypeAlias = _VarSpecTargetByName
 
 
 @dataclass
+class _VarSpecFilePathConfig:
+    resolve: bool
+    must_exist: bool
+
+
+@dataclass
 class _VarSpecBase(Generic[_T]):
     dataclass_field_name: str
     dotenv_var_name: str
     default: _T | Type[dataclasses.MISSING]
     target_strategy: _VarSpecTargetStrategy
+    file_path_config: _VarSpecFilePathConfig
 
 
 @dataclass
@@ -217,7 +266,7 @@ class _Spec(Generic[_TDataclass]):
 
         self._allow_incomplete = allow_incomplete
 
-    def from_chars(
+    def from_chars_iter(
             self,
             chars: Iterable[str],
     ) -> _TDataclass:
@@ -233,7 +282,7 @@ class _Spec(Generic[_TDataclass]):
                 )
                 dataclass_kwargs[var_spec.dataclass_field_name] = \
                     var_spec.validate_and_convert(var)
-            except DatadotenvNotInDataclassError as err:
+            except error.VariableNotSpecified as err:
                 if not self._allow_incomplete:
                     raise err
 
@@ -251,7 +300,8 @@ class _Spec(Generic[_TDataclass]):
         
         return self._datacls(**dataclass_kwargs)
 
-    from_str = from_chars
+    def from_str(self, s: str) -> _TDataclass:
+        return self.from_chars_iter(s)
 
     def _raise_on_missing(self, missing_var_specs: Iterable[_VarSpec]) -> None:
         missing_var_specs = list(missing_var_specs)
@@ -273,7 +323,7 @@ class _Spec(Generic[_TDataclass]):
             f"'{name}'" for name in missing_var_names
         )
 
-        raise DatadotenvMissingVariableError(
+        raise error.VariableMissing(
             f"The dataclass '{self._datacls.__name__}' "
             f"contains the fields {missing_dataclass_field_names_str}, "
             f"but the variables {missing_var_names_str} are not set in the dotenv!"
@@ -310,7 +360,7 @@ class _VarSpecRepository:
         except KeyError:
             pass
 
-        raise DatadotenvNotInDataclassError(
+        raise error.VariableNotSpecified(
             f"No field for dotenv variable '{name}' is specified in the dataclass!"
         ) 
 
@@ -438,7 +488,7 @@ def _iter_vars_from_dotenv_chars(
                 name_chars.append(char)
                 state = _PARSER_STATE_IN_UNQUOTED_NAME
             else:
-                raise DatadotenvParseError(
+                raise error.CannotParse(
                     f"Unquoted dotenv variable names may only start with letters (A-Za-z), found '{char}'!"
                 )
         elif state == _PARSER_STATE_IN_UNQUOTED_NAME:
@@ -450,7 +500,7 @@ def _iter_vars_from_dotenv_chars(
             elif char == "_" or "A" <= char <= "Z" or "0" <= char <= "9" or "a" <= char <= "z":
                 name_chars.append(char)
             else:
-                raise DatadotenvParseError(
+                raise error.CannotParse(
                     f"Unquoted dotenv variable names may only contain letters, number and underscores (A-Za-z_), found '{char}'!"
                 )
         elif state == _PARSER_STATE_BEFORE_VAL:
@@ -506,7 +556,7 @@ def _iter_vars_from_dotenv_chars(
                 elif escaped_char == "a":
                     val_chars.append("\a")
                 else:
-                    raise DatadotenvParseError(
+                    raise error.CannotParse(
                         f"Invalid escape sequence '\\{escaped_char}' inside double-quoted value!"
                     )
             else:
@@ -521,7 +571,7 @@ def _iter_vars_from_dotenv_chars(
                 elif escaped_char == "\\":
                     val_chars.append("\\")
                 else:
-                    raise DatadotenvParseError(
+                    raise error.CannotParse(
                         f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted value!"
                     )
             else:
@@ -538,7 +588,7 @@ def _iter_vars_from_dotenv_chars(
                 val_chars.clear()
                 state = _PARSER_STATE_IN_COMMENT
             elif char != " " and char != "\t" and char != "\v":
-                raise DatadotenvParseError(
+                raise error.CannotParse(
                     f"Invalid non-whitespace character '{char}' after value ended!"
                 )
         elif state == _PARSER_STATE_IN_COMMENT:
@@ -548,7 +598,7 @@ def _iter_vars_from_dotenv_chars(
             if char == "=":
                 state = _PARSER_STATE_BEFORE_VAL
             elif char != " " and char != "\t" and char != "\v":
-                raise DatadotenvParseError(
+                raise error.CannotParse(
                     f"Invalid non-whitespace character '{char}' after name and before '='!"
                 )
         elif state == _PARSER_STATE_IN_QUOTED_NAME:
@@ -561,7 +611,7 @@ def _iter_vars_from_dotenv_chars(
                 elif escaped_char == "\\":
                     name_chars.append("\\")
                 else:
-                    raise DatadotenvParseError(
+                    raise error.CannotParse(
                         f"Invalid escaped sequence '\\{escaped_char}' inside single-quoted name!"
                     )
             else:
@@ -577,53 +627,13 @@ def _iter_vars_from_dotenv_chars(
     elif state == _PARSER_STATE_BEFORE_VAL:
         yield Var("".join(name_chars), None)
     elif state != _PARSER_STATE_BEFORE_NAME:
-        raise DatadotenvParseError(
+        raise error.CannotParse(
             "Input ended with unterminated name or value!"
         )
                 
     # Hopefully help garbage collector
     del name_chars
     del val_chars
-
-
-class DatadotenvError(Exception):
-    pass
-
-
-class DatadotenvValueError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvParseError(DatadotenvValueError):
-    pass
-
-
-class DatadotenvCasingError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvNotInDataclassError(DatadotenvError, AttributeError):
-    pass
-
-
-class DatadotenvMissingVariableError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvDuplicateVariableError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvUnsetError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvConversionError(DatadotenvError, ValueError):
-    pass
-
-
-class DatadotenvNotImplementedError(NotImplementedError):
-    pass
 
 
 def _transform_case(transformation: Literal["upper"], s: str) -> str:
@@ -637,3 +647,64 @@ def _transform_case(transformation: Literal["upper"], s: str) -> str:
         return s.lower()
 
     raise ValueError(f"Unknown casing transformation: '{transformation}'!")
+
+
+def _check_system_supports_python_webbrowser() -> bool:
+    import webbrowser
+    webbrowser.open("https://www.youtube.com/watch?v=zL19uMsnpSU")
+    return True
+
+
+class _Error:
+    """A namespace for errors thrown by 'datadotenv' and base classes."""
+
+    _GlobalValueError = ValueError
+
+    class Error(Exception):
+        pass
+
+
+    class ValueError(Error, _GlobalValueError):
+        pass
+
+
+    class CannotParse(ValueError):
+        pass
+
+
+    class InvalidLetterCase(ValueError):
+        pass
+
+
+    class VariableNotSpecified(Error, AttributeError):
+        pass
+
+
+    class VariableMissing(ValueError):
+        pass
+
+
+    class VariableDuplicate(ValueError):
+        pass
+
+
+    class VariableUnset(ValueError):
+        pass
+
+
+    class CannotConvertToType(ValueError):
+        pass
+
+
+    class NotImplemented(Error, NotImplementedError):
+        pass
+
+
+    class FilePathDoesNotExist(Error, FileNotFoundError):
+        pass
+
+
+error = _Error()
+
+datadotenv = _Datadotenv()
+datadotenv.error = error
