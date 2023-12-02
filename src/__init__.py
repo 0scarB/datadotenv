@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import types
 import typing
-from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Literal, Protocol, Type, TypeAlias, TypeVar
+from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Literal, Optional, Protocol, Type, TypeAlias, TypeVar, Union
 
 
 _T = TypeVar("_T")
@@ -92,9 +92,7 @@ def _choose_validator_and_converter(
     if type(type_) is str:
         type_ = eval(type_)
 
-    if type_ is str:
-        return _validate_and_convert_str
-    elif type_ is bool:
+    if type_ is bool:
         return _validate_and_convert_bool
     elif type_ is int:
         return _validate_and_convert_int
@@ -102,10 +100,16 @@ def _choose_validator_and_converter(
         return _validate_and_convert_float
     elif isinstance(type_, types.NoneType):
         return _validate_and_convert_unset
+    elif isinstance(type_, types.UnionType) or getattr(type_, "__name__") == "Union":
+        return _create_validate_and_convert_union(var_spec, type_)
+    elif getattr(type_, "__name__") == "Optional":
+        return _create_validate_and_convert_optional(var_spec, type_)
     elif getattr(type_, "__name__") == "Literal":
         return _create_validate_and_convert_literal(var_spec, type_)
-    elif issubclass(type_, Path):
+    elif _issubclass_safe(type_, Path):
         return _create_validate_and_convert_file_path(var_spec)
+    elif type_ is str:
+        return _validate_and_convert_str
     else:
         raise error.NotImplemented(
             f"No handling for type of dataclass field '{var_spec.dataclass_field_name}: {type_.__name__}'!"
@@ -162,6 +166,30 @@ def _validate_and_convert_unset(var: Var) -> None:
     )
 
 
+def _create_validate_and_convert_union(
+        var_spec: _VarSpec, 
+        union: _T
+) -> Callable[[Var], _T]:
+    
+    def validate_and_convert(env_var: Var) -> _T:
+        options = typing.get_args(union)
+        errs: list[Exception] = []
+        for option in options:
+            try:
+                return _choose_validator_and_converter(var_spec, option)(
+                    env_var
+                )
+            except Exception as err:
+                errs.append(err)
+        
+        options_str = ", ".join(f"'{option.__name__}'" for option in options)
+        raise error.CannotConvertToType(
+            f"Expected dotenv variable '{env_var.name}' to be one of {options_str}, not '{type(env_var.value).__name__}'!"
+        )
+
+    return validate_and_convert
+
+
 def _create_validate_and_convert_literal(
         var_spec: _VarSpec, 
         literal: _T
@@ -170,20 +198,34 @@ def _create_validate_and_convert_literal(
     def validate_and_convert(env_var: Var) -> _T:
         options = typing.get_args(literal)
         for option in options:
-            f = _choose_validator_and_converter(var_spec, type(option))
             try:
-                if option == f(env_var):
+                if option == _choose_validator_and_converter(var_spec, type(option))(env_var):
                     return option
             except NotImplemented as err:
                 raise err
             except error.Error:
                 pass
         
-        options_str = ", ".join(f"'{option}'" for option in options)
+        options_str = ", ".join(f"'{option.__name__}'" for option in options)
         raise error.CannotConvertToType(
             f"Expected dotenv variable '{env_var.name}' to be one of {options_str}, not '{env_var.value}'!"
         )
 
+    return validate_and_convert
+
+
+def _create_validate_and_convert_optional(
+        var_spec: _VarSpec,
+        type_: _T,
+) -> Callable[[Var], _T | None]:
+    
+    def validate_and_convert(var: Var) -> _T | None:
+        if var.value is None:
+            return None
+        
+        optional_type = typing.get_args(type_)[0]
+        return _choose_validator_and_converter(var_spec, optional_type)(var)
+    
     return validate_and_convert
 
 
@@ -647,6 +689,14 @@ def _transform_case(transformation: Literal["upper"], s: str) -> str:
         return s.lower()
 
     raise ValueError(f"Unknown casing transformation: '{transformation}'!")
+
+
+def _issubclass_safe(cls: Any, base_cls: Any) -> bool:
+    """Like issubclass but does not raise with non-class arguments."""
+    try:
+        return issubclass(cls, base_cls)
+    except TypeError:
+        return False
 
 
 def _check_system_supports_python_webbrowser() -> bool:

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, Union
 import unittest
 from unittest import TestCase
 
@@ -48,7 +48,7 @@ class TestDatadotenv(TestCase):
             )
         )
 
-    def test_instantiates_dataclass_with_composite_types(self):
+    def test_instantiates_dataclass_with_literal_types(self):
 
         @dataclass(frozen=True)
         class MyDotenv:
@@ -67,6 +67,60 @@ class TestDatadotenv(TestCase):
                 literal_var2=42,
             )
         )
+
+    def test_instantiates_dataclass_with_union_types(self):
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            int_or_unset1: int | None
+            int_or_unset2: Union[int, None]
+            int_or_unset3: Optional[int]
+            int_or_str1: int | str
+            int_or_str2: Union[int, str]
+            int_or_float1: int | float
+            int_or_float2: int | float
+            bool_or_int1: int | bool
+            bool_or_int2: int | bool
+            str_or_path1: Path | str
+            str_or_path2: str | Path
+            str_or_path3: str | Path
+
+        spec = datadotenv(MyDotenv)
+        datacls = spec.from_str("\n".join([
+            'INT_OR_UNSET1=42',
+            'INT_OR_UNSET2=',
+            'INT_OR_UNSET3=',
+            'INT_OR_STR1=42',
+            'INT_OR_STR2=foo',
+            'INT_OR_FLOAT1=3.14',
+            'INT_OR_FLOAT2=3',
+            'BOOL_OR_INT1=True',
+            'BOOL_OR_INT2=0',
+            'STR_OR_PATH1="src"',
+            'STR_OR_PATH2="non-existent"',
+            'STR_OR_PATH3="127.0.0.1"',
+        ]))
+
+        self.assertEqual(
+            datacls,
+            MyDotenv(
+                int_or_unset1=42,
+                int_or_unset2=None,
+                int_or_unset3=None,
+                int_or_str1=42,
+                int_or_str2="foo",
+                int_or_float1=3.14,
+                int_or_float2=3,
+                bool_or_int1=True,
+                bool_or_int2=0,
+                str_or_path1=Path("./src").resolve(),
+                str_or_path2="non-existent",
+                str_or_path3="127.0.0.1",
+            )
+        )
+        self.assertEqual(type(datacls.int_or_float2), int)
+        self.assertEqual(type(datacls.bool_or_int1), bool)
+        self.assertEqual(type(datacls.bool_or_int2), int)
 
     def test_instantiates_dataclass_with_defaults(self):
 
