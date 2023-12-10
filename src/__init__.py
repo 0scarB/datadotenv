@@ -37,11 +37,6 @@ _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 _Casing: TypeAlias = Literal["upper", "lower", "preserve", "ignore"]
 
 
-_HandleTypeTypeMatcher = \
-    tuple[Literal["check"], Callable[[Any], bool]] \
-    | Type[Any]
-
-
 class _Datadotenv:
     error: _Error
 
@@ -54,10 +49,11 @@ class _Datadotenv:
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
         handle_types: \
-            Iterable[
-                tuple[_HandleTypeTypeMatcher, Callable[[str], Any]]
-                | tuple[_HandleTypeTypeMatcher, Callable[[str], Any], Any]
-            ] | None \
+            Iterable[tuple[
+                tuple[Literal["check"], Callable[[Any], bool]] | Type[Any], 
+                Callable[[str], Any]
+            ] | _Datadotenv.HandleType[_T]] \
+            | None \
             = None,
     ) -> _Spec[_TDataclass]:
         var_specs: list[_VarSpec[Any]] = []
@@ -79,17 +75,10 @@ class _Datadotenv:
 
         custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec] = []
         if handle_types is not None:
-            for item in handle_types:
-                default_if_unset: Any = ...
-                if len(item) == 2:
-                    type_matcher, convert_str_to_type = item
-                else:
-                    type_matcher, convert_str_to_type, default_if_unset = item
+            for handle_type in handle_types:
                 custom_validators_and_converters_specs.append(
                     _create_validator_and_converter_spec(
-                        type_matcher,
-                        convert_str_to_type,
-                        default_if_unset=default_if_unset,
+                        handle_type,
                     )
                 )
 
@@ -110,6 +99,19 @@ class _Datadotenv:
             )
         import webbrowser
         webbrowser.open(url)
+
+    @dataclass
+    class HandleType(Generic[_T]):
+        type_matcher: tuple[
+            Literal["check"],
+            Callable[[Any], bool],
+        ] | Type[_T]
+        convert_str_to_type: Callable[[str], _T]
+        _: dataclasses.KW_ONLY
+        default_if_unset: _T | types.EllipsisType = ...
+        validate: \
+            Callable[[_T], bool | str | Exception] | None \
+            = None
 
 
 @dataclass
@@ -222,12 +224,16 @@ class _Spec(Generic[_TDataclass]):
             convert_str_to_type: Callable[[str], _T],
             /, *,
             default_if_unset: _T | types.EllipsisType = ...,
+            validate: Callable[[_T], bool | str | Exception] | None = None,
     ) -> Self:
         self._custom_validators_and_converters_specs.append(
             _create_validator_and_converter_spec(
-                type_matcher, 
-                convert_str_to_type, 
-                default_if_unset=default_if_unset
+                _Datadotenv.HandleType(
+                    type_matcher=type_matcher,
+                    convert_str_to_type=convert_str_to_type,
+                    default_if_unset=default_if_unset,
+                    validate=validate,
+                )
             )
         )
 
@@ -364,10 +370,26 @@ class _VarSpecResolveGroup:
 
 
 def _create_validator_and_converter_spec(
-        type_matcher: _HandleTypeTypeMatcher,
-        convert_str_to_type: Callable[[str], _T],
-        default_if_unset: _T | types.EllipsisType = ...,
+        user_input: tuple[
+            tuple[Literal["check"], Callable[[Any], bool]] | Type[_T],
+            Callable[[str], _T],
+        ] | _Datadotenv.HandleType[_T],
 ) -> _ValidatorAndConverterSpec:
+    if isinstance(user_input, _Datadotenv.HandleType):
+        type_matcher = user_input.type_matcher
+        convert_str_to_type = user_input.convert_str_to_type
+        default_if_unset = user_input.default_if_unset
+        validate = user_input.validate
+    else:
+        if len(user_input) != 2:
+            raise ValueError(
+                "'handle_types' tuple have a length of 2!"
+            )
+        type_matcher = user_input[0]
+        convert_str_to_type = user_input[1]
+        default_if_unset: _T | types.EllipsisType = ...
+        validate: Callable[[_T], bool | str | Exception] | None = None
+    
     type_matcher_error = ValueError(
         "'handle_type(s)' type matcher must be the class or type "
         "expected in the type annotation of a dataclass field "
@@ -375,6 +397,7 @@ def _create_validator_and_converter_spec(
         "recieves the dataclasses field's tyep and returns a boolean!"
     )
     if type(type_matcher) is tuple:
+        type_matcher = cast(tuple, type_matcher)
         if len(type_matcher) != 2 or type_matcher[0] != "check":
             raise type_matcher_error
         check_type_matches = type_matcher[1]
@@ -398,14 +421,27 @@ def _create_validator_and_converter_spec(
         if var.value is None:
             if default_if_unset is ...:
                 raise error.VariableUnset(
-                    "The value of the dotenv variable "
-                    f"targetting the dataclass field '{var.name}' "
+                    f"The value of the dotenv variable '{var.name}' "
                     "was unset and the custom type conversion was "
                     "not used!"
                 )
-            return default_if_unset
+            value = default_if_unset
+        else:
+            value = convert_str_to_type(var.value)
 
-        return convert_str_to_type(var.value)
+        if validate is not None:
+            validate_res = validate(value)
+            if validate_res is False:
+                raise error.InvalidValue(
+                    f"The dotenv variable '{var.name}'s "
+                    f"value is invalid '{var.value}'!"
+                )
+            elif validate_res is str:
+                raise error.InvalidValue(validate_res)
+            elif isinstance(validate_res, Exception):
+                raise validate_res
+
+        return value
 
     return _ValidatorAndConverterSpec(
         check_type_matches=check_type_matches,
@@ -1105,6 +1141,10 @@ class _Error:
 
 
     class FilePathDoesNotExist(Error, FileNotFoundError):
+        pass
+
+
+    class InvalidValue(ValueError):
         pass
 
 

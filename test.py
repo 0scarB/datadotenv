@@ -331,7 +331,9 @@ class TestDatadotenv(TestCase):
             )
         )
 
-    def test_supports_different_options_for_complete_or_incomplete_description_of_dotenv(self):
+    def test_supports_different_options_for_complete_or_incomplete_description_of_dotenv(
+            self,
+    ):
 
         @dataclass(frozen=True)
         class MyDotenv:
@@ -381,6 +383,17 @@ class TestDatadotenv(TestCase):
         SystemPort = NewType("SystemPort", int)
         EphemeralPort = NewType("EphemalPort", int)
 
+        system_port_type_handler = datadotenv.HandleType(
+            SystemPort,
+            lambda s: int(s),
+            validate=lambda port: port < 1024,
+        )
+        ephemeral_port_type_handler = datadotenv.HandleType(
+            EphemeralPort,
+            lambda s: int(s),
+            validate=lambda port: 1024 < port < 65536,
+        )
+
         IntDefaultMinusOne = NewType("IntDefault0", int)
 
         @dataclass(frozen=True)
@@ -404,11 +417,13 @@ class TestDatadotenv(TestCase):
                         lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))
                     ),
                     (CustomType, lambda _: "CustomType"),
-                    (
-                        ("check", lambda t: t in {SystemPort, EphemeralPort}),
+                    system_port_type_handler,
+                    ephemeral_port_type_handler,
+                    datadotenv.HandleType(
+                        IntDefaultMinusOne, 
                         lambda s: int(s),
+                        default_if_unset=cast(IntDefaultMinusOne, -1),
                     ),
-                    (IntDefaultMinusOne, lambda s: int(s), cast(IntDefaultMinusOne, -1)),
                 ]
             ).from_str("\n".join([
                 'INST_OF_CUSTOM_CLS=foo',
@@ -431,7 +446,36 @@ class TestDatadotenv(TestCase):
                 custom_int2=cast(IntDefaultMinusOne, -1),
             )
         )
-    
+
+        @dataclass
+        class MyDotenv:
+            system_port: SystemPort
+            ephemeral_port: EphemeralPort
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            datadotenv(
+                MyDotenv,
+                handle_types=[
+                    system_port_type_handler,
+                    ephemeral_port_type_handler,
+                ],
+            ).from_str("\n".join([
+                'SYSTEM_PORT=8080',
+                'EPHEMERAL_PORT=8080',
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            datadotenv(
+                MyDotenv, 
+                handle_types=[
+                    system_port_type_handler,
+                    ephemeral_port_type_handler,
+                ],
+            ).from_str("\n".join([
+                'SYSTEM_PORT=80',
+                'EPHEMERAL_PORT=80',
+            ]))
+
     def test_can_convert_custom_types_with_handle_type_method_chaining(self):
         
         class CustomClass:
@@ -503,6 +547,41 @@ class TestDatadotenv(TestCase):
                 custom_int2=cast(IntDefaultMinusOne, -1),
             )
         )
+
+        @dataclass
+        class MyDotenv:
+            system_port: SystemPort
+            ephemeral_port: EphemeralPort
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            datadotenv(MyDotenv)\
+                .handle_type(
+                    SystemPort,
+                    lambda s: int(s),
+                    validate=lambda port: port < 1024,
+                ).handle_type(
+                    EphemeralPort,
+                    lambda s: int(s),
+                    validate=lambda port: 1023 < port < 65536,
+                ).from_str("\n".join([
+                    'SYSTEM_PORT=8080',
+                    'EPHEMERAL_PORT=8080',
+                ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            datadotenv(MyDotenv)\
+                .handle_type(
+                    SystemPort,
+                    lambda s: int(s),
+                    validate=lambda port: port < 1024,
+                ).handle_type(
+                    EphemeralPort,
+                    lambda s: int(s),
+                    validate=lambda port: 1023 < port < 65536,
+                ).from_str("\n".join([
+                    'SYSTEM_PORT=80',
+                    'EPHEMERAL_PORT=80',
+                ]))
 
 
 class TestParseDotenvFromCharsIter(TestCase):
