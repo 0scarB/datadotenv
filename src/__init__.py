@@ -35,20 +35,13 @@ class _Datadotenv:
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
     ) -> _Spec[_TDataclass]:
-        
-        def placeholder_validate_and_convert(_: Var) -> Any:
-            raise RuntimeError(
-                f"{_VarSpecSingleton.validate_and_convert.__qualname__} "
-                f"must be set by {_mut_var_spec_for_type.__qualname__}!"
-            )
-
-        var_specs: list[_VarSpecSingleton[Any]] = []
+        var_specs: list[_VarSpec[Any]] = []
         for field in dataclasses.fields(datacls):
-            var_spec = _VarSpecSingleton(
+            var_specs.append(_VarSpec(
                 dataclass_field_name=field.name,
+                dataclass_field_type=field.type,
                 dotenv_var_name=_transform_case(case, field.name),
                 default=field.default,
-                validate_and_convert=placeholder_validate_and_convert,
                 target_strategy=_VarSpecTargetByName(
                     name=_transform_case(case, field.name),
                     ignore_case=case == "ignore",
@@ -57,9 +50,7 @@ class _Datadotenv:
                     resolve=resolve_file_paths,
                     must_exist=file_paths_must_exist,
                 )
-            )
-            _mut_var_spec_for_type(var_spec, field.type)
-            var_specs.append(var_spec)
+            ))
 
         return _Spec(
             datacls, 
@@ -79,15 +70,225 @@ class _Datadotenv:
         webbrowser.open(url)
 
 
-def _mut_var_spec_for_type(var_spec: _VarSpecSingleton[Any], type_: Any) -> None:
-    var_spec.validate_and_convert = _choose_validator_and_converter(
-        var_spec,
-        type_,
-    )
+@dataclass
+class Var:
+    name: str
+    value: str | None
+
+
+@dataclass
+class _VarSpecTargetByName:
+    name: str
+    ignore_case: bool 
+
+
+_VarSpecTargetStrategy: TypeAlias = _VarSpecTargetByName
+
+
+@dataclass
+class _VarSpecFilePathConfig:
+    resolve: bool
+    must_exist: bool
+
+
+@dataclass
+class _VarSpec(Generic[_T]):
+    dataclass_field_name: str
+    dataclass_field_type: Any
+    dotenv_var_name: str
+    default: _T | Literal[dataclasses.MISSING]
+    target_strategy: _VarSpecTargetStrategy
+    file_path_config: _VarSpecFilePathConfig
+
+
+class _Spec(Generic[_TDataclass]):
+    _datacls: Type[_TDataclass]
+    _var_specs: _VarSpecRepository
+
+    _allow_incomplete: bool
+
+    def __init__(
+            self,
+            datacls: Type[_TDataclass],
+            var_specs: list[_VarSpec[Any]],
+            allow_incomplete: bool,
+    ) -> None:
+        self._datacls = datacls
+        self._var_specs = _VarSpecRepository(var_specs)
+
+        self._allow_incomplete = allow_incomplete
+
+    def from_chars_iter(
+            self,
+            chars: Iterable[str],
+    ) -> _TDataclass:
+        var_spec_resolve_group = _VarSpecResolveGroup(self._var_specs)
+
+        dataclass_kwargs: dict[str, Any] = {}
+
+        for var in parse.dotenv_from_chars_iter(chars):
+            try:
+                var_spec = (
+                    var_spec_resolve_group
+                    .find_spec_for_var_and_mark_as_resolved(var)
+                )
+                validate_and_convert = _choose_validator_and_converter(
+                    var_spec,
+                    var_spec.dataclass_field_type,
+                )
+                dataclass_kwargs[var_spec.dataclass_field_name] = \
+                    validate_and_convert(var)
+            except error.VariableNotSpecified as err:
+                if not self._allow_incomplete:
+                    raise err
+
+        for unresolved_var_spec \
+                in var_spec_resolve_group.get_unresolved_specs():
+            if unresolved_var_spec.default != dataclasses.MISSING:
+                dataclass_kwargs[unresolved_var_spec.dataclass_field_name] =\
+                    unresolved_var_spec.default
+                var_spec_resolve_group.mark_as_resolved(
+                    unresolved_var_spec
+                )
+
+        self._raise_on_missing(
+            var_spec_resolve_group.get_unresolved_specs()
+        )
+        
+        return self._datacls(**dataclass_kwargs)
+
+    def from_str(self, s: str) -> _TDataclass:
+        return self.from_chars_iter(s)
+
+    def _raise_on_missing(self, missing_var_specs: Iterable[_VarSpec]) -> None:
+        missing_var_specs = list(missing_var_specs)
+        if len(missing_var_specs) == 0:
+            return
+
+        missing_dataclass_field_names: list[str] = []
+        missing_var_names: list[str] = []
+        for unresolved_spec in missing_var_specs:
+            missing_dataclass_field_names\
+                .append(unresolved_spec.dataclass_field_name)
+            missing_var_names\
+                .append(unresolved_spec.dotenv_var_name)
+        
+        missing_dataclass_field_names_str = ", ".join(
+            f"'{name}'" for name in missing_dataclass_field_names
+        )
+        missing_var_names_str = ", ".join(
+            f"'{name}'" for name in missing_var_names
+        )
+
+        raise error.VariableMissing(
+            f"The dataclass '{self._datacls.__name__}' "
+            f"contains the fields {missing_dataclass_field_names_str}, "
+            f"but the variables {missing_var_names_str} are not set in the dotenv!"
+        )
+
+class _VarSpecRepository:
+    _specs: list[_VarSpec]
+    _case_sensitive_names_to_spec_indices: dict[str, int]
+    _case_insensitive_names_to_spec_indices: dict[str, int]
+
+    def __init__(self, var_specs: list[_VarSpec]) -> None:
+        self.update(var_specs)
+
+    def update(self, var_specs: list[_VarSpec]) -> None:
+        self._specs = var_specs
+        self._case_sensitive_names_to_spec_indices = \
+            self._create_case_sensitive_names_to_spec_indices_map(var_specs)
+        self._case_insensitive_names_to_spec_indices = \
+            self._create_case_insensitive_names_to_spec_indices_map(var_specs)
+
+    def find_spec_idx_for_var(self, var: Var) -> int:
+        return self.find_spec_idx_for_var_name(var.name)
+
+    def find_spec_idx_for_var_name(self, name: str) -> int:
+        case_sensitive_name = name
+        try:
+            return self._case_sensitive_names_to_spec_indices[case_sensitive_name]
+        except KeyError:
+            pass
+
+        case_insensitive_name = case_sensitive_name.lower()
+        try:
+            return self._case_insensitive_names_to_spec_indices[case_insensitive_name]
+        except KeyError:
+            pass
+
+        raise error.VariableNotSpecified(
+            f"No field for dotenv variable '{name}' is specified in the dataclass!"
+        ) 
+
+    def __getitem__(self, idx: int) -> _VarSpec:
+        return self._specs[idx]
+
+    def __len__(self) -> int:
+        return len(self._specs)
+    
+    def __iter__(self) -> Iterable[_VarSpec]:
+        return iter(self._specs)
+
+    def _create_case_sensitive_names_to_spec_indices_map(
+            self,
+            specs: list[_VarSpec],
+    ) -> dict[str, int]:
+        map_: dict[str, int] = {}
+        for idx, spec in enumerate(specs):
+            if (
+                isinstance(spec.target_strategy, _VarSpecTargetByName)
+                and not spec.target_strategy.ignore_case
+            ):
+                map_[spec.dotenv_var_name] = idx
+
+        return map_
+
+    def _create_case_insensitive_names_to_spec_indices_map(
+            self,
+            specs: list[_VarSpec],
+    ) -> dict[str, int]:
+        map_: dict[str, int] = {}
+        for idx, spec in enumerate(specs):
+            if (
+                isinstance(spec.target_strategy, _VarSpecTargetByName)
+                and spec.target_strategy.ignore_case
+            ):
+                map_[spec.dotenv_var_name.lower()] = idx
+
+        return map_
+
+
+class _VarSpecResolveGroup:
+    _specs: _VarSpecRepository
+    _resolved: list[bool]
+
+    def __init__(self, specs_repo: _VarSpecRepository) -> None:
+        self._specs = specs_repo
+        self._resolved = [False] * len(self._specs)
+
+    def mark_as_resolved(self, spec: _VarSpec) -> None:
+        idx = self._specs.find_spec_idx_for_var_name(
+            spec.dotenv_var_name,
+        )
+        self._resolved[idx] = True
+
+    def find_spec_for_var_and_mark_as_resolved(
+            self,
+            var: Var,
+    ) -> _VarSpec:
+        idx = self._specs.find_spec_idx_for_var(var)
+        self._resolved[idx] = True
+        return self._specs[idx]
+
+    def get_unresolved_specs(self) -> Iterator[_VarSpec]:
+        for spec, is_resolved in zip(cast(Iterable[_VarSpec], self._specs), self._resolved):
+            if not is_resolved:
+                yield spec
 
 
 def _choose_validator_and_converter(
-        var_spec: _VarSpecSingleton[Any],
+        var_spec: _VarSpec[Any],
         type_: Any,
 ) -> Callable[[Var], Any]:
     if type(type_) is str:
@@ -174,7 +375,7 @@ def _validate_and_convert_unset(var: Var) -> None:
 
 
 def _create_validate_and_convert_union(
-        var_spec: _VarSpecSingleton[Any], 
+        var_spec: _VarSpec[Any], 
         union: _T
 ) -> Callable[[Var], _T]:
     
@@ -198,7 +399,7 @@ def _create_validate_and_convert_union(
 
 
 def _create_validate_and_convert_literal(
-        var_spec: _VarSpecSingleton[Any], 
+        var_spec: _VarSpec[Any], 
         literal: _T
 ) -> Callable[[Var], _T]:
     
@@ -222,7 +423,7 @@ def _create_validate_and_convert_literal(
 
 
 def _create_validate_and_convert_optional(
-        var_spec: _VarSpecSingleton[Any],
+        var_spec: _VarSpec[Any],
         type_: _T,
 ) -> Callable[[Var], _T | None]:
     
@@ -237,7 +438,7 @@ def _create_validate_and_convert_optional(
 
 
 def _create_validate_and_convert_file_path(
-        var_spec: _VarSpecSingleton[Any],
+        var_spec: _VarSpec[Any],
 ) -> Callable[[Var], Path]:
     
     def validate_and_convert(var: Var) -> Path:
@@ -293,230 +494,6 @@ def _validate_and_convert_timedelta(var: Var) -> datetime.timedelta:
             "to be a time duration, e.g. '1s', '1m', '1h', '1d', etc., not unset!"
         )
     return parse.timedelta(var.value)
-
-
-@dataclass
-class Var:
-    name: str
-    value: str | None
-
-
-@dataclass
-class _VarSpecTargetByName:
-    name: str
-    ignore_case: bool 
-
-
-_VarSpecTargetStrategy: TypeAlias = _VarSpecTargetByName
-
-
-@dataclass
-class _VarSpecFilePathConfig:
-    resolve: bool
-    must_exist: bool
-
-
-@dataclass
-class _VarSpecBase(Generic[_T]):
-    dataclass_field_name: str
-    dotenv_var_name: str
-    default: _T | Literal[dataclasses.MISSING]
-    target_strategy: _VarSpecTargetStrategy
-    file_path_config: _VarSpecFilePathConfig
-
-
-@dataclass
-class _VarSpecSingleton(_VarSpecBase[_T]):
-    validate_and_convert: Callable[[Var], _T]
-
-
-@dataclass
-class _VarSpecAccumulator(_VarSpecBase[_T]):
-    validate_and_accumulate: Callable[[_T, Var], _T]
-
-
-_VarSpec: TypeAlias = _VarSpecSingleton[Any] | _VarSpecAccumulator[Any]
-
-
-class _Spec(Generic[_TDataclass]):
-    _datacls: Type[_TDataclass]
-    _var_specs: _VarSpecRepository
-
-    _allow_incomplete: bool
-
-    def __init__(
-            self,
-            datacls: Type[_TDataclass],
-            var_specs: list[_VarSpecSingleton[Any]],
-            allow_incomplete: bool,
-    ) -> None:
-        self._datacls = datacls
-        self._var_specs = _VarSpecRepository(var_specs)
-
-        self._allow_incomplete = allow_incomplete
-
-    def from_chars_iter(
-            self,
-            chars: Iterable[str],
-    ) -> _TDataclass:
-        var_spec_resolve_group = _VarSpecResolveGroup(self._var_specs)
-
-        dataclass_kwargs: dict[str, Any] = {}
-
-        for var in parse.dotenv_from_chars_iter(chars):
-            try:
-                var_spec = (
-                    var_spec_resolve_group
-                    .find_spec_for_var_and_mark_as_resolved(var)
-                )
-                dataclass_kwargs[var_spec.dataclass_field_name] = \
-                    var_spec.validate_and_convert(var)
-            except error.VariableNotSpecified as err:
-                if not self._allow_incomplete:
-                    raise err
-
-        for unresolved_var_spec \
-                in var_spec_resolve_group.get_unresolved_specs():
-            if unresolved_var_spec.default != dataclasses.MISSING:
-                dataclass_kwargs[unresolved_var_spec.dataclass_field_name] = unresolved_var_spec.default
-                var_spec_resolve_group.mark_as_resolved(
-                    unresolved_var_spec
-                )
-
-        self._raise_on_missing(
-            var_spec_resolve_group.get_unresolved_specs()
-        )
-        
-        return self._datacls(**dataclass_kwargs)
-
-    def from_str(self, s: str) -> _TDataclass:
-        return self.from_chars_iter(s)
-
-    def _raise_on_missing(self, missing_var_specs: Iterable[_VarSpec]) -> None:
-        missing_var_specs = list(missing_var_specs)
-        if len(missing_var_specs) == 0:
-            return
-
-        missing_dataclass_field_names: list[str] = []
-        missing_var_names: list[str] = []
-        for unresolved_spec in missing_var_specs:
-            missing_dataclass_field_names\
-                .append(unresolved_spec.dataclass_field_name)
-            missing_var_names\
-                .append(unresolved_spec.dotenv_var_name)
-        
-        missing_dataclass_field_names_str = ", ".join(
-            f"'{name}'" for name in missing_dataclass_field_names
-        )
-        missing_var_names_str = ", ".join(
-            f"'{name}'" for name in missing_var_names
-        )
-
-        raise error.VariableMissing(
-            f"The dataclass '{self._datacls.__name__}' "
-            f"contains the fields {missing_dataclass_field_names_str}, "
-            f"but the variables {missing_var_names_str} are not set in the dotenv!"
-        )
-
-class _VarSpecRepository:
-    _specs: list[_VarSpecSingleton]
-    _case_sensitive_names_to_spec_indices: dict[str, int]
-    _case_insensitive_names_to_spec_indices: dict[str, int]
-
-    def __init__(self, var_specs: list[_VarSpecSingleton]) -> None:
-        self.update(var_specs)
-
-    def update(self, var_specs: list[_VarSpecSingleton]) -> None:
-        self._specs = var_specs
-        self._case_sensitive_names_to_spec_indices = \
-            self._create_case_sensitive_names_to_spec_indices_map(var_specs)
-        self._case_insensitive_names_to_spec_indices = \
-            self._create_case_insensitive_names_to_spec_indices_map(var_specs)
-
-    def find_spec_idx_for_var(self, var: Var) -> int:
-        return self.find_spec_idx_for_var_name(var.name)
-
-    def find_spec_idx_for_var_name(self, name: str) -> int:
-        case_sensitive_name = name
-        try:
-            return self._case_sensitive_names_to_spec_indices[case_sensitive_name]
-        except KeyError:
-            pass
-
-        case_insensitive_name = case_sensitive_name.lower()
-        try:
-            return self._case_insensitive_names_to_spec_indices[case_insensitive_name]
-        except KeyError:
-            pass
-
-        raise error.VariableNotSpecified(
-            f"No field for dotenv variable '{name}' is specified in the dataclass!"
-        ) 
-
-    def __getitem__(self, idx: int) -> _VarSpecSingleton:
-        return self._specs[idx]
-
-    def __len__(self) -> int:
-        return len(self._specs)
-    
-    def __iter__(self) -> Iterable[_VarSpec]:
-        return iter(self._specs)
-
-    def _create_case_sensitive_names_to_spec_indices_map(
-            self,
-            specs: list[_VarSpecSingleton],
-    ) -> dict[str, int]:
-        map_: dict[str, int] = {}
-        for idx, spec in enumerate(specs):
-            if (
-                isinstance(spec.target_strategy, _VarSpecTargetByName)
-                and not spec.target_strategy.ignore_case
-            ):
-                map_[spec.dotenv_var_name] = idx
-
-        return map_
-
-    def _create_case_insensitive_names_to_spec_indices_map(
-            self,
-            specs: list[_VarSpecSingleton],
-    ) -> dict[str, int]:
-        map_: dict[str, int] = {}
-        for idx, spec in enumerate(specs):
-            if (
-                isinstance(spec.target_strategy, _VarSpecTargetByName)
-                and spec.target_strategy.ignore_case
-            ):
-                map_[spec.dotenv_var_name.lower()] = idx
-
-        return map_
-
-
-class _VarSpecResolveGroup:
-    _specs: _VarSpecRepository
-    _resolved: list[bool]
-
-    def __init__(self, specs_repo: _VarSpecRepository) -> None:
-        self._specs = specs_repo
-        self._resolved = [False] * len(self._specs)
-
-    def mark_as_resolved(self, spec: _VarSpec) -> None:
-        idx = self._specs.find_spec_idx_for_var_name(
-            spec.dotenv_var_name,
-        )
-        self._resolved[idx] = True
-
-    def find_spec_for_var_and_mark_as_resolved(
-            self,
-            var: Var,
-    ) -> _VarSpecSingleton:
-        idx = self._specs.find_spec_idx_for_var(var)
-        self._resolved[idx] = True
-        return self._specs[idx]
-
-    def get_unresolved_specs(self) -> Iterator[_VarSpec]:
-        for spec, is_resolved in zip(cast(Iterable[_VarSpec], self._specs), self._resolved):
-            if not is_resolved:
-                yield spec
 
 
 class _Parse:
