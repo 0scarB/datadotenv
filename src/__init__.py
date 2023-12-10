@@ -6,7 +6,21 @@ import datetime
 from pathlib import Path
 import types
 import typing
-from typing import Any, Callable, cast, ClassVar, Generic, Iterable, Iterator, Literal, Protocol, Type, TypeAlias, TypeVar
+from typing import (
+    Any, 
+    Callable, 
+    cast, 
+    ClassVar, 
+    Generic, 
+    Iterable, 
+    Iterator, 
+    Literal, 
+    Protocol, 
+    Self,
+    Type, 
+    TypeAlias, 
+    TypeVar,
+)
 
 
 _T = TypeVar("_T")
@@ -198,6 +212,26 @@ class _Spec(Generic[_TDataclass]):
 
     def from_str(self, s: str) -> _TDataclass:
         return self.from_chars_iter(s)
+
+    def handle_type(
+            self,
+            type_matcher: tuple[
+                Literal["check"], 
+                Callable[[Type[_T]], bool]
+            ] | Type[_T],
+            convert_str_to_type: Callable[[str], _T],
+            /, *,
+            default_if_unset: _T | types.EllipsisType = ...,
+    ) -> Self:
+        self._custom_validators_and_converters_specs.append(
+            _create_validator_and_converter_spec(
+                type_matcher, 
+                convert_str_to_type, 
+                default_if_unset=default_if_unset
+            )
+        )
+
+        return self
 
     def _raise_on_missing(self, missing_var_specs: Iterable[_VarSpec]) -> None:
         missing_var_specs = list(missing_var_specs)

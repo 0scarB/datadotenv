@@ -394,22 +394,23 @@ class TestDatadotenv(TestCase):
             custom_int1: IntDefaultMinusOne
             custom_int2: IntDefaultMinusOne
 
-        spec = datadotenv(
-            MyDotenv, 
-            handle_types=[
-                (CustomClass, lambda _: custom_cls_insts.pop(0)),
-                (Fraction, lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))),
-                (CustomType, lambda _: "CustomType"),
-                (
-                    ("check", lambda t: t in {SystemPort, EphemeralPort}),
-                    lambda s: int(s),
-                ),
-                (IntDefaultMinusOne, lambda s: int(s), cast(IntDefaultMinusOne, -1))
-            ]
-        )
-
         self.assertEqual(
-            spec.from_str("\n".join([
+            datadotenv(
+                MyDotenv, 
+                handle_types=[
+                    (CustomClass, lambda _: custom_cls_insts.pop(0)),
+                    (
+                        Fraction, 
+                        lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))
+                    ),
+                    (CustomType, lambda _: "CustomType"),
+                    (
+                        ("check", lambda t: t in {SystemPort, EphemeralPort}),
+                        lambda s: int(s),
+                    ),
+                    (IntDefaultMinusOne, lambda s: int(s), cast(IntDefaultMinusOne, -1)),
+                ]
+            ).from_str("\n".join([
                 'INST_OF_CUSTOM_CLS=foo',
                 'INST_OF_CUSTOM_CLS2=bar',
                 'FRAC=3/4',
@@ -419,6 +420,78 @@ class TestDatadotenv(TestCase):
                 'CUSTOM_INT1=42',
                 'CUSTOM_INT2=',
             ])),
+            MyDotenv(
+                inst_of_custom_cls=custom_cls_inst,
+                inst_of_custom_cls2=custom_sub_cls_inst,
+                frac=Fraction(3, 4),
+                inst_of_custom_type=cast(CustomType, "CustomType"),
+                prod_port=cast(SystemPort, 80),
+                dev_port=cast(EphemeralPort, 8080),
+                custom_int1=cast(IntDefaultMinusOne, 42),
+                custom_int2=cast(IntDefaultMinusOne, -1),
+            )
+        )
+    
+    def test_can_convert_custom_types_with_handle_type_method_chaining(self):
+        
+        class CustomClass:
+            pass
+
+        class CustomSubClass(CustomClass):
+            pass
+
+        custom_cls_inst = CustomClass()
+        custom_sub_cls_inst = CustomSubClass()
+        custom_cls_insts = [
+            custom_cls_inst,
+            custom_sub_cls_inst,
+        ]
+
+        CustomType = NewType("CustomType", str)
+
+        SystemPort = NewType("SystemPort", int)
+        EphemeralPort = NewType("EphemalPort", int)
+
+        IntDefaultMinusOne = NewType("IntDefault0", int)
+
+        @dataclass(frozen=True)
+        class MyDotenv:
+            inst_of_custom_cls: CustomClass
+            inst_of_custom_cls2: CustomClass
+            frac: Fraction
+            inst_of_custom_type: CustomType
+            prod_port: SystemPort
+            dev_port: EphemeralPort
+            custom_int1: IntDefaultMinusOne
+            custom_int2: IntDefaultMinusOne
+
+        self.assertEqual(
+            datadotenv(MyDotenv)\
+                .handle_type(CustomClass, lambda _: custom_cls_insts.pop(0))\
+                .handle_type(
+                    Fraction, 
+                    lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))
+                )\
+                .handle_type(CustomType, lambda _: "CustomType")\
+                .handle_type(
+                    ("check", lambda t: t in {SystemPort, EphemeralPort}),
+                    lambda s: int(s),
+                )\
+                .handle_type(
+                    IntDefaultMinusOne, 
+                    lambda s: int(s), 
+                    default_if_unset=cast(IntDefaultMinusOne, -1)
+                )\
+                .from_str("\n".join([
+                    'INST_OF_CUSTOM_CLS=foo',
+                    'INST_OF_CUSTOM_CLS2=bar',
+                    'FRAC=3/4',
+                    'INST_OF_CUSTOM_TYPE=baz',
+                    'PROD_PORT=80',
+                    'DEV_PORT=8080',
+                    'CUSTOM_INT1=42',
+                    'CUSTOM_INT2=',
+                ])),
             MyDotenv(
                 inst_of_custom_cls=custom_cls_inst,
                 inst_of_custom_cls2=custom_sub_cls_inst,
