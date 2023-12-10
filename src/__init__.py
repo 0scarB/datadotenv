@@ -23,6 +23,11 @@ _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 _Casing: TypeAlias = Literal["upper", "lower", "preserve", "ignore"]
 
 
+_HandleTypeTypeMatcher = \
+    tuple[Literal["check"], Callable[[Any], bool]] \
+    | Type[Any]
+
+
 class _Datadotenv:
     error: _Error
 
@@ -34,6 +39,12 @@ class _Datadotenv:
         allow_incomplete: bool = False,
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
+        handle_types: \
+            Iterable[
+                tuple[_HandleTypeTypeMatcher, Callable[[str], Any]]
+                | tuple[_HandleTypeTypeMatcher, Callable[[str], Any], Any]
+            ] | None \
+            = None,
     ) -> _Spec[_TDataclass]:
         var_specs: list[_VarSpec[Any]] = []
         for field in dataclasses.fields(datacls):
@@ -52,10 +63,27 @@ class _Datadotenv:
                 )
             ))
 
+        custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec] = []
+        if handle_types is not None:
+            for item in handle_types:
+                default_if_unset: Any = ...
+                if len(item) == 2:
+                    type_matcher, convert_str_to_type = item
+                else:
+                    type_matcher, convert_str_to_type, default_if_unset = item
+                custom_validators_and_converters_specs.append(
+                    _create_validator_and_converter_spec(
+                        type_matcher,
+                        convert_str_to_type,
+                        default_if_unset=default_if_unset,
+                    )
+                )
+
         return _Spec(
             datacls, 
             var_specs,
             allow_incomplete=allow_incomplete,
+            custom_validators_and_converters_specs=custom_validators_and_converters_specs,
         )
 
     def open_docs(self) -> None:
@@ -101,22 +129,32 @@ class _VarSpec(Generic[_T]):
     file_path_config: _VarSpecFilePathConfig
 
 
+@dataclass
+class _ValidatorAndConverterSpec(Generic[_T]):
+    check_type_matches: Callable[[Type[_T]], bool]
+    validate_and_convert: Callable[[Var], _T]
+
+
 class _Spec(Generic[_TDataclass]):
     _datacls: Type[_TDataclass]
     _var_specs: _VarSpecRepository
 
     _allow_incomplete: bool
+    _custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec]
 
     def __init__(
             self,
             datacls: Type[_TDataclass],
             var_specs: list[_VarSpec[Any]],
             allow_incomplete: bool,
+            custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec],
     ) -> None:
         self._datacls = datacls
         self._var_specs = _VarSpecRepository(var_specs)
 
         self._allow_incomplete = allow_incomplete
+        self._custom_validators_and_converters_specs = \
+            custom_validators_and_converters_specs
 
     def from_chars_iter(
             self,
@@ -135,6 +173,7 @@ class _Spec(Generic[_TDataclass]):
                 validate_and_convert = _choose_validator_and_converter(
                     var_spec,
                     var_spec.dataclass_field_type,
+                    self._custom_validators_and_converters_specs,
                 )
                 dataclass_kwargs[var_spec.dataclass_field_name] = \
                     validate_and_convert(var)
@@ -282,14 +321,68 @@ class _VarSpecResolveGroup:
         return self._specs[idx]
 
     def get_unresolved_specs(self) -> Iterator[_VarSpec]:
-        for spec, is_resolved in zip(cast(Iterable[_VarSpec], self._specs), self._resolved):
+        for spec, is_resolved in zip(
+                cast(Iterable[_VarSpec], self._specs), 
+                self._resolved
+        ):
             if not is_resolved:
                 yield spec
+
+
+def _create_validator_and_converter_spec(
+        type_matcher: _HandleTypeTypeMatcher,
+        convert_str_to_type: Callable[[str], _T],
+        default_if_unset: _T | types.EllipsisType = ...,
+) -> _ValidatorAndConverterSpec:
+    type_matcher_error = ValueError(
+        "'handle_type(s)' type matcher must be the class or type "
+        "expected in the type annotation of a dataclass field "
+        "a tuple '(\"check\", <function>)' where the function "
+        "recieves the dataclasses field's tyep and returns a boolean!"
+    )
+    if type(type_matcher) is tuple:
+        if len(type_matcher) != 2 or type_matcher[0] != "check":
+            raise type_matcher_error
+        check_type_matches = type_matcher[1]
+    else:
+        def check_type_matches(type_: Any, /) -> bool:
+            try:
+                if isinstance(type_matcher, type_):
+                    return True
+            except:
+                pass
+
+            try:
+                if issubclass(cast(type, type_matcher), type_):
+                    return True
+            except:
+                pass
+
+            return type_matcher is type_
+
+    def validate_and_convert(var: Var) -> Any:
+        if var.value is None:
+            if default_if_unset is ...:
+                raise error.VariableUnset(
+                    "The value of the dotenv variable "
+                    f"targetting the dataclass field '{var.name}' "
+                    "was unset and the custom type conversion was "
+                    "not used!"
+                )
+            return default_if_unset
+
+        return convert_str_to_type(var.value)
+
+    return _ValidatorAndConverterSpec(
+        check_type_matches=check_type_matches,
+        validate_and_convert=validate_and_convert,
+    )
 
 
 def _choose_validator_and_converter(
         var_spec: _VarSpec[Any],
         type_: Any,
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
 ) -> Callable[[Var], Any]:
     if type(type_) is str:
         type_ = eval(type_)
@@ -303,11 +396,23 @@ def _choose_validator_and_converter(
     elif isinstance(type_, types.NoneType):
         return _validate_and_convert_unset
     elif isinstance(type_, types.UnionType) or getattr(type_, "__name__") == "Union":
-        return _create_validate_and_convert_union(var_spec, type_)
+        return _create_validate_and_convert_union(
+            var_spec, 
+            type_,
+            custom_validator_and_converter_specs,
+        )
     elif getattr(type_, "__name__") == "Optional":
-        return _create_validate_and_convert_optional(var_spec, type_)
+        return _create_validate_and_convert_optional(
+            var_spec, 
+            type_,
+            custom_validator_and_converter_specs,
+        )
     elif getattr(type_, "__name__") == "Literal":
-        return _create_validate_and_convert_literal(var_spec, type_)
+        return _create_validate_and_convert_literal(
+            var_spec, 
+            type_,
+            custom_validator_and_converter_specs,
+        )
     elif _issubclass_safe(type_, Path):
         return _create_validate_and_convert_file_path(var_spec)
     elif type_ is datetime.datetime:
@@ -319,8 +424,12 @@ def _choose_validator_and_converter(
     elif type_ is str:
         return _validate_and_convert_str
     else:
+        for validator_and_converter_spec in custom_validator_and_converter_specs:
+            if validator_and_converter_spec.check_type_matches(type_):
+                return validator_and_converter_spec.validate_and_convert
         raise error.NotImplemented(
-            f"No handling for type of dataclass field '{var_spec.dataclass_field_name}: {type_.__name__}'!"
+            "No handling for type of dataclass field "
+            f"'{var_spec.dataclass_field_name}: {type_.__name__}'!"
         )
 
 
@@ -376,7 +485,8 @@ def _validate_and_convert_unset(var: Var) -> None:
 
 def _create_validate_and_convert_union(
         var_spec: _VarSpec[Any], 
-        union: _T
+        union: _T,
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
 ) -> Callable[[Var], _T]:
     
     def validate_and_convert(env_var: Var) -> _T:
@@ -384,7 +494,11 @@ def _create_validate_and_convert_union(
         errs: list[Exception] = []
         for option in options:
             try:
-                return _choose_validator_and_converter(var_spec, option)(
+                return _choose_validator_and_converter(
+                    var_spec, 
+                    option,
+                    custom_validator_and_converter_specs,
+                )(
                     env_var
                 )
             except Exception as err:
@@ -400,14 +514,19 @@ def _create_validate_and_convert_union(
 
 def _create_validate_and_convert_literal(
         var_spec: _VarSpec[Any], 
-        literal: _T
+        literal: _T,
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
 ) -> Callable[[Var], _T]:
     
     def validate_and_convert(env_var: Var) -> _T:
         options = typing.get_args(literal)
         for option in options:
             try:
-                if option == _choose_validator_and_converter(var_spec, type(option))(env_var):
+                if option == _choose_validator_and_converter(
+                    var_spec, 
+                    type(option),
+                    custom_validator_and_converter_specs,
+                )(env_var):
                     return option
             except NotImplemented as err:
                 raise err
@@ -425,6 +544,7 @@ def _create_validate_and_convert_literal(
 def _create_validate_and_convert_optional(
         var_spec: _VarSpec[Any],
         type_: _T,
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
 ) -> Callable[[Var], _T | None]:
     
     def validate_and_convert(var: Var) -> _T | None:
@@ -432,7 +552,11 @@ def _create_validate_and_convert_optional(
             return None
         
         optional_type = typing.get_args(type_)[0]
-        return _choose_validator_and_converter(var_spec, optional_type)(var)
+        return _choose_validator_and_converter(
+            var_spec, 
+            optional_type,
+            custom_validator_and_converter_specs,
+        )(var)
     
     return validate_and_convert
 
