@@ -6,7 +6,7 @@ import datetime
 from pathlib import Path
 import types
 import typing
-from typing import Any, Callable, ClassVar, Generic, Iterable, Iterator, Literal, Optional, Protocol, Type, TypeAlias, TypeVar, Union
+from typing import Any, Callable, cast, ClassVar, Generic, Iterable, Iterator, Literal, Protocol, Type, TypeAlias, TypeVar
 
 
 _T = TypeVar("_T")
@@ -42,7 +42,7 @@ class _Datadotenv:
                 f"must be set by {_mut_var_spec_for_type.__qualname__}!"
             )
 
-        var_specs: list[_VarSpec] = []
+        var_specs: list[_VarSpecSingleton[Any]] = []
         for field in dataclasses.fields(datacls):
             var_spec = _VarSpecSingleton(
                 dataclass_field_name=field.name,
@@ -79,7 +79,7 @@ class _Datadotenv:
         webbrowser.open(url)
 
 
-def _mut_var_spec_for_type(var_spec: _VarSpec, type_: Any) -> None:
+def _mut_var_spec_for_type(var_spec: _VarSpecSingleton[Any], type_: Any) -> None:
     var_spec.validate_and_convert = _choose_validator_and_converter(
         var_spec,
         type_,
@@ -87,7 +87,7 @@ def _mut_var_spec_for_type(var_spec: _VarSpec, type_: Any) -> None:
 
 
 def _choose_validator_and_converter(
-        var_spec: _VarSpec,
+        var_spec: _VarSpecSingleton[Any],
         type_: Any,
 ) -> Callable[[Var], Any]:
     if type(type_) is str:
@@ -144,7 +144,7 @@ def _validate_and_convert_bool(var: Var) -> bool:
     )
 
 
-def _validate_and_convert_int(var: Var) -> bool:
+def _validate_and_convert_int(var: Var) -> int:
     str_value = _validate_and_convert_str(var)
     try:
         return int(str_value)
@@ -154,7 +154,7 @@ def _validate_and_convert_int(var: Var) -> bool:
         )
 
 
-def _validate_and_convert_float(var: Var) -> bool:
+def _validate_and_convert_float(var: Var) -> float:
     str_value = _validate_and_convert_str(var)
     try:
         return float(str_value)
@@ -174,7 +174,7 @@ def _validate_and_convert_unset(var: Var) -> None:
 
 
 def _create_validate_and_convert_union(
-        var_spec: _VarSpec, 
+        var_spec: _VarSpecSingleton[Any], 
         union: _T
 ) -> Callable[[Var], _T]:
     
@@ -198,7 +198,7 @@ def _create_validate_and_convert_union(
 
 
 def _create_validate_and_convert_literal(
-        var_spec: _VarSpec, 
+        var_spec: _VarSpecSingleton[Any], 
         literal: _T
 ) -> Callable[[Var], _T]:
     
@@ -222,7 +222,7 @@ def _create_validate_and_convert_literal(
 
 
 def _create_validate_and_convert_optional(
-        var_spec: _VarSpec,
+        var_spec: _VarSpecSingleton[Any],
         type_: _T,
 ) -> Callable[[Var], _T | None]:
     
@@ -237,10 +237,16 @@ def _create_validate_and_convert_optional(
 
 
 def _create_validate_and_convert_file_path(
-        var_spec: _VarSpec,
+        var_spec: _VarSpecSingleton[Any],
 ) -> Callable[[Var], Path]:
     
     def validate_and_convert(var: Var) -> Path:
+        if var.value is None:
+            raise error.VariableUnset(
+                f"Expected dotenv variable '{var_spec.dotenv_var_name}' "
+                "to be a file path, not unset!"
+            )
+
         file_path = Path(var.value)
         if var_spec.file_path_config.resolve:
             file_path = Path.resolve(file_path)
@@ -256,6 +262,12 @@ def _create_validate_and_convert_file_path(
 
 
 def _validate_and_convert_datetime(var: Var) -> datetime.datetime:
+    if var.value is None:
+        raise error.VariableUnset(
+            f"Expected dotenv variable for dataclass field '{var.name}' "
+            "to be an ISO-formatted datetime string, not unset!"
+        )
+
     try:
         return datetime.datetime.fromisoformat(var.value)
     except ValueError as err:
@@ -263,6 +275,11 @@ def _validate_and_convert_datetime(var: Var) -> datetime.datetime:
 
 
 def _validate_and_convert_date(var: Var) -> datetime.date:
+    if var.value is None:
+        raise error.VariableUnset(
+            f"Expected dotenv variable for dataclass field '{var.name}' "
+            "to be an ISO-formatted date string, not unset!"
+        )
     try:
         return datetime.date.fromisoformat(var.value)
     except ValueError as err:
@@ -270,6 +287,11 @@ def _validate_and_convert_date(var: Var) -> datetime.date:
 
 
 def _validate_and_convert_timedelta(var: Var) -> datetime.timedelta:
+    if var.value is None:
+        raise error.VariableUnset(
+            f"Expected dotenv variable for dataclass field '{var.name}' "
+            "to be a time duration, e.g. '1s', '1m', '1h', '1d', etc., not unset!"
+        )
     return parse.timedelta(var.value)
 
 
@@ -298,7 +320,7 @@ class _VarSpecFilePathConfig:
 class _VarSpecBase(Generic[_T]):
     dataclass_field_name: str
     dotenv_var_name: str
-    default: _T | Type[dataclasses.MISSING]
+    default: _T | Literal[dataclasses.MISSING]
     target_strategy: _VarSpecTargetStrategy
     file_path_config: _VarSpecFilePathConfig
 
@@ -324,8 +346,8 @@ class _Spec(Generic[_TDataclass]):
 
     def __init__(
             self,
-            datacls: _TDataclass,
-            var_specs: list[_VarSpec],
+            datacls: Type[_TDataclass],
+            var_specs: list[_VarSpecSingleton[Any]],
             allow_incomplete: bool,
     ) -> None:
         self._datacls = datacls
@@ -397,14 +419,14 @@ class _Spec(Generic[_TDataclass]):
         )
 
 class _VarSpecRepository:
-    _specs: list[_VarSpec]
-    _case_sensitive_names_to_spec_indices = dict[str, int]
-    _case_insensitive_names_to_spec_indices = dict[str, int]
+    _specs: list[_VarSpecSingleton]
+    _case_sensitive_names_to_spec_indices: dict[str, int]
+    _case_insensitive_names_to_spec_indices: dict[str, int]
 
-    def __init__(self, var_specs: list[_VarSpec]) -> None:
+    def __init__(self, var_specs: list[_VarSpecSingleton]) -> None:
         self.update(var_specs)
 
-    def update(self, var_specs: list[_VarSpec]) -> None:
+    def update(self, var_specs: list[_VarSpecSingleton]) -> None:
         self._specs = var_specs
         self._case_sensitive_names_to_spec_indices = \
             self._create_case_sensitive_names_to_spec_indices_map(var_specs)
@@ -431,7 +453,7 @@ class _VarSpecRepository:
             f"No field for dotenv variable '{name}' is specified in the dataclass!"
         ) 
 
-    def __getitem__(self, idx: int) -> _VarSpec:
+    def __getitem__(self, idx: int) -> _VarSpecSingleton:
         return self._specs[idx]
 
     def __len__(self) -> int:
@@ -442,7 +464,7 @@ class _VarSpecRepository:
 
     def _create_case_sensitive_names_to_spec_indices_map(
             self,
-            specs: list[_VarSpec],
+            specs: list[_VarSpecSingleton],
     ) -> dict[str, int]:
         map_: dict[str, int] = {}
         for idx, spec in enumerate(specs):
@@ -456,7 +478,7 @@ class _VarSpecRepository:
 
     def _create_case_insensitive_names_to_spec_indices_map(
             self,
-            specs: list[_VarSpec],
+            specs: list[_VarSpecSingleton],
     ) -> dict[str, int]:
         map_: dict[str, int] = {}
         for idx, spec in enumerate(specs):
@@ -486,13 +508,13 @@ class _VarSpecResolveGroup:
     def find_spec_for_var_and_mark_as_resolved(
             self,
             var: Var,
-    ) -> _VarSpec:
+    ) -> _VarSpecSingleton:
         idx = self._specs.find_spec_idx_for_var(var)
         self._resolved[idx] = True
         return self._specs[idx]
 
     def get_unresolved_specs(self) -> Iterator[_VarSpec]:
-        for spec, is_resolved in zip(self._specs, self._resolved):
+        for spec, is_resolved in zip(cast(Iterable[_VarSpec], self._specs), self._resolved):
             if not is_resolved:
                 yield spec
 
@@ -531,7 +553,7 @@ class _Parse:
     def _iter_vars_from_dotenv_chars(
             self,
             chars: Iterator[str],
-    ) -> Iterator[tuple[str, str]]:
+    ) -> Iterator[Var]:
         # Parse implementation tries to be compatible with python-dotenv.
         # See: https://pypi.org/project/python-dotenv -- File format
 
@@ -811,7 +833,7 @@ class _Parse:
         milliseconds = 0
         microseconds = 0
         ord = 0
-        num: int | None = None
+        num: float | None = None
         for token in tokens:
             if num is None:
                 try:
@@ -875,7 +897,7 @@ class _Parse:
         )
 
 
-def _transform_case(transformation: Literal["upper"], s: str) -> str:
+def _transform_case(transformation: _Casing, s: str) -> str:
     if transformation == "upper":
         return s.upper()
     elif transformation == "lower":

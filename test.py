@@ -194,7 +194,7 @@ class TestDatadotenv(TestCase):
         )
 
         # Test option to not check existence
-        self.assertAlmostEqual(
+        self.assertEqual(
             datadotenv(MyDotenv, file_paths_must_exist=False).from_str("\n".join([
                 'FILE_PATH=./non-existent'
             ])),
@@ -258,7 +258,7 @@ class TestDatadotenv(TestCase):
             MyDotenv(timedelta(hours=1, minutes=30)),
         )
 
-        with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
+        with self.assertRaises(datadotenv.error.CannotParse):
             datadotenv(MyDotenv).from_str("\n".join([
                 'DELTA="1h 30n"'
             ])),
@@ -271,7 +271,7 @@ class TestDatadotenv(TestCase):
             mixed_CASING: str
         
         # Test defaults to uppercase
-        self.assertAlmostEqual(
+        self.assertEqual(
             datadotenv(MyDotenv).from_str("\n".join([
                 'NORMAL_CASING=foo',
                 'MIXED_CASING=bar',
@@ -283,7 +283,7 @@ class TestDatadotenv(TestCase):
         )
         
         # Test explicit uppercase
-        self.assertAlmostEqual(
+        self.assertEqual(
             datadotenv(MyDotenv, case="upper").from_str("\n".join([
                 'NORMAL_CASING=foo',
                 'MIXED_CASING=bar',
