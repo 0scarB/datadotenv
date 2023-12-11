@@ -48,6 +48,7 @@ class _Datadotenv:
         allow_incomplete: bool = False,
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
+        retarget: Iterable[tuple[str, str]] | None = None,
         validate: \
             Iterable[
                 tuple[str, Callable[[Any], bool | str | Exception | None]]
@@ -99,6 +100,10 @@ class _Datadotenv:
             allow_incomplete=allow_incomplete,
             custom_validators_and_converters_specs=custom_validators_and_converters_specs,
         )
+
+        if retarget is not None:
+            for old_name, new_name in retarget:
+                spec.retarget(old_name, new_name)
 
         if validate is not None:
             for dotenv_var_name_or_dataclass_field_name, user_validate in validate:
@@ -262,6 +267,15 @@ class _Spec(Generic[_TDataclass]):
     def from_str(self, s: str) -> _TDataclass:
         return self.from_chars_iter(s)
 
+    def retarget(self, old_name: str, new_name: str, /) -> Self:
+        spec = self._var_specs.find_spec_by_dotenv_var_name_or_dataclass_field_name(
+            old_name,
+        )
+        spec.dotenv_var_name = new_name
+        self._var_specs.update()
+
+        return self
+
     def validate(
             self,
             dotenv_or_dataclass_var_name: str,
@@ -385,14 +399,16 @@ class _VarSpecRepository:
     def __init__(self, var_specs: list[_VarSpec]) -> None:
         self.update(var_specs)
 
-    def update(self, var_specs: list[_VarSpec]) -> None:
-        self._specs = var_specs
+    def update(self, var_specs: list[_VarSpec] | None = None) -> None:
+        if var_specs is not None:
+            self._specs = var_specs
+
         self._case_sensitive_names_to_spec_indices = \
-            self._create_case_sensitive_names_to_spec_indices_map(var_specs)
+            self._create_case_sensitive_names_to_spec_indices_map(self._specs)
         self._case_insensitive_names_to_spec_indices = \
-            self._create_case_insensitive_names_to_spec_indices_map(var_specs)
+            self._create_case_insensitive_names_to_spec_indices_map(self._specs)
         self._dataclass_field_names_to_spec_indices = \
-            self._create_dataclass_field_names_to_spec_indices_map(var_specs)
+            self._create_dataclass_field_names_to_spec_indices_map(self._specs)
 
     def find_spec_by_dotenv_var_name_or_dataclass_field_name(
             self, 

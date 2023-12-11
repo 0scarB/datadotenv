@@ -488,6 +488,78 @@ class TestDatadotenv(TestCase):
             "Reserved for postgreSQL database!"
         )
 
+    def test_can_retarget_different_dataclass_fields_with_retarget_parameter(self):
+
+        @dataclass
+        class MyDotenv:
+            port: int
+            domain: str
+
+        spec = datadotenv(
+            MyDotenv,
+            retarget=[
+                ("port", "SERVER_PORT"),
+                ("DOMAIN", "SERVER_DOMAIN"),
+            ],
+        )
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'SERVER_PORT=443',
+                'SERVER_DOMAIN=example.com',
+            ])),
+            MyDotenv(
+                port=443,
+                domain="example.com",
+            )
+        )
+
+        # Test that old names are no longer valid
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            spec.from_str("\n".join([
+                'PORT=443',
+                'SERVER_DOMAIN=example.com',
+            ]))
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            spec.from_str("\n".join([
+                'SERVER_PORT=443',
+                'DOMAIN=example.com',
+            ]))
+
+    def test_can_retarget_different_dataclass_fields_with_retarget_method_chaining(self):
+
+        @dataclass
+        class MyDotenv:
+            port: int
+            domain: str
+
+        spec = datadotenv(MyDotenv)\
+            .retarget("port", "SERVER_PORT")\
+            .retarget("DOMAIN", "SERVER_DOMAIN")
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'SERVER_PORT=443',
+                'SERVER_DOMAIN=example.com',
+            ])),
+            MyDotenv(
+                port=443,
+                domain="example.com",
+            )
+        )
+
+        # Test that old names are no longer valid
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            spec.from_str("\n".join([
+                'PORT=443',
+                'SERVER_DOMAIN=example.com',
+            ]))
+        with self.assertRaises(datadotenv.error.VariableNotSpecified):
+            spec.from_str("\n".join([
+                'SERVER_PORT=443',
+                'DOMAIN=example.com',
+            ]))
+
     def test_can_convert_custom_types_with_handle_types_parameter(self):
 
         class CustomClass:
