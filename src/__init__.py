@@ -48,13 +48,22 @@ class _Datadotenv:
         allow_incomplete: bool = False,
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
-        handle_types: \
-            Iterable[tuple[
-                tuple[Literal["check"], Callable[[Any], bool]] | Type[Any], 
-                Callable[[str], Any]
-            ] | _Datadotenv.HandleType[_T]] \
-            | None \
-            = None,
+        validate: \
+            Iterable[
+                tuple[str, Callable[[Any], bool | str | Exception | None]]
+            ] | None = None,
+        convert_types: \
+            Iterable[
+                tuple[
+                    tuple[Literal["check"], Callable[[Any], bool]] | Type[Any], 
+                    Callable[[str], Any]
+                ] | _Datadotenv.ConvertType[Any]
+            ] | None = None,
+        convert: \
+            Iterable[
+                tuple[str, Callable[[str], Any]]
+                | _Datadotenv.Convert
+            ] | None = None,
     ) -> _Spec[_TDataclass]:
         var_specs: list[_VarSpec[Any]] = []
         for field in dataclasses.fields(datacls):
@@ -70,24 +79,50 @@ class _Datadotenv:
                 file_path_config=_VarSpecFilePathConfig(
                     resolve=resolve_file_paths,
                     must_exist=file_paths_must_exist,
-                )
+                ),
+                custom_convert=None,
+                custom_validate=None,
             ))
 
         custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec] = []
-        if handle_types is not None:
-            for handle_type in handle_types:
+        if convert_types is not None:
+            for convert_type in convert_types:
                 custom_validators_and_converters_specs.append(
                     _create_validator_and_converter_spec(
-                        handle_type,
+                        convert_type,
                     )
                 )
 
-        return _Spec(
+        spec = _Spec(
             datacls, 
             var_specs,
             allow_incomplete=allow_incomplete,
             custom_validators_and_converters_specs=custom_validators_and_converters_specs,
         )
+
+        if validate is not None:
+            for dotenv_var_name_or_dataclass_field_name, user_validate in validate:
+                spec.validate(
+                    dotenv_var_name_or_dataclass_field_name,
+                    user_validate,
+                )
+        if convert is not None:
+            for item in convert:
+                if isinstance(item, _Datadotenv.Convert):
+                    spec.convert(
+                        item.name,
+                        item.convert_str_to_type,
+                        default_if_unset=item.default_if_unset,
+                        validate=item.validate,
+                    )
+                else:
+                    dotenv_var_name_or_dataclass_field_name, convert_str_to_type = item
+                    spec.convert(
+                        dotenv_var_name_or_dataclass_field_name,
+                        convert_str_to_type,
+                    )
+
+        return spec
 
     def open_docs(self) -> None:
         """Opens the documentation in your browser."""
@@ -101,11 +136,21 @@ class _Datadotenv:
         webbrowser.open(url)
 
     @dataclass
-    class HandleType(Generic[_T]):
+    class ConvertType(Generic[_T]):
         type_matcher: tuple[
             Literal["check"],
             Callable[[Any], bool],
         ] | Type[_T]
+        convert_str_to_type: Callable[[str], _T]
+        _: dataclasses.KW_ONLY
+        default_if_unset: _T | types.EllipsisType = ...
+        validate: \
+            Callable[[_T], bool | str | Exception] | None \
+            = None
+
+    @dataclass
+    class Convert(Generic[_T]):
+        name: str
         convert_str_to_type: Callable[[str], _T]
         _: dataclasses.KW_ONLY
         default_if_unset: _T | types.EllipsisType = ...
@@ -143,6 +188,8 @@ class _VarSpec(Generic[_T]):
     default: _T | Literal[dataclasses.MISSING]
     target_strategy: _VarSpecTargetStrategy
     file_path_config: _VarSpecFilePathConfig
+    custom_convert: Callable[[Var], _T] | None
+    custom_validate: Callable[[Var, _T], None] | None
 
 
 @dataclass
@@ -215,7 +262,33 @@ class _Spec(Generic[_TDataclass]):
     def from_str(self, s: str) -> _TDataclass:
         return self.from_chars_iter(s)
 
-    def handle_type(
+    def validate(
+            self,
+            dotenv_or_dataclass_var_name: str,
+            validate: Callable[[_T], bool | str | Exception | None]
+    ) -> Self:
+        spec = self._var_specs.find_spec_by_dotenv_var_name_or_dataclass_field_name(
+            dotenv_or_dataclass_var_name,
+        )
+
+        resolved_validate = _resolve_user_validate(validate)
+
+        if spec.custom_validate is None:
+            spec.custom_validate = resolved_validate
+        else:
+            prev_custom_validate = spec.custom_validate
+
+            def custom_validate(var: Var, value: _T) -> None:
+                # TODO: Use an exception group here in versions of python
+                #       that support them.
+                prev_custom_validate(var, value)
+                resolved_validate(var, value)
+
+            spec.custom_validate = custom_validate
+
+        return self
+
+    def convert_type(
             self,
             type_matcher: tuple[
                 Literal["check"], 
@@ -228,7 +301,7 @@ class _Spec(Generic[_TDataclass]):
     ) -> Self:
         self._custom_validators_and_converters_specs.append(
             _create_validator_and_converter_spec(
-                _Datadotenv.HandleType(
+                _Datadotenv.ConvertType(
                     type_matcher=type_matcher,
                     convert_str_to_type=convert_str_to_type,
                     default_if_unset=default_if_unset,
@@ -236,6 +309,44 @@ class _Spec(Generic[_TDataclass]):
                 )
             )
         )
+
+        return self
+
+    def convert(
+            self,
+            dotenv_or_dataclass_var_name: str,
+            convert_str_to_type: Callable[[str], _T],
+            /,
+            default_if_unset: _T | types.EllipsisType = ...,
+            validate: Callable[[_T], bool | str | Exception] | None = None,
+    ) -> Self:
+        spec = self._var_specs.find_spec_by_dotenv_var_name_or_dataclass_field_name(
+            dotenv_or_dataclass_var_name,
+        )
+
+        if spec.custom_convert is None:
+            def custom_convert(var: Var, /) -> _T:
+                if var.value is None:
+                    if default_if_unset is ...:
+                        raise error.VariableUnset(
+                            f"The value of the dotenv variable '{var.name}' "
+                            "was unset and the custom type conversion was "
+                            "not used!"
+                        )
+                    value = default_if_unset
+                else:
+                    value = convert_str_to_type(var.value)
+
+                return value
+            
+            spec.custom_convert = custom_convert
+        else:
+            raise ValueError(
+                f"Duplicate custom conversion for '{dotenv_or_dataclass_var_name}'!"
+            )
+
+        if validate is not None:
+            self.validate(dotenv_or_dataclass_var_name, validate)
 
         return self
 
@@ -269,6 +380,7 @@ class _VarSpecRepository:
     _specs: list[_VarSpec]
     _case_sensitive_names_to_spec_indices: dict[str, int]
     _case_insensitive_names_to_spec_indices: dict[str, int]
+    _dataclass_field_names_to_spec_indices: dict[str, int]
 
     def __init__(self, var_specs: list[_VarSpec]) -> None:
         self.update(var_specs)
@@ -279,6 +391,27 @@ class _VarSpecRepository:
             self._create_case_sensitive_names_to_spec_indices_map(var_specs)
         self._case_insensitive_names_to_spec_indices = \
             self._create_case_insensitive_names_to_spec_indices_map(var_specs)
+        self._dataclass_field_names_to_spec_indices = \
+            self._create_dataclass_field_names_to_spec_indices_map(var_specs)
+
+    def find_spec_by_dotenv_var_name_or_dataclass_field_name(
+            self, 
+            name: str,
+    ) -> _VarSpec:
+        first_error: Exception
+        try:
+            return self._specs[self.find_spec_idx_for_var_name(name)]
+        except error.VariableNotSpecified as error_:
+            first_error = error_
+
+        try:
+            return self._specs[
+                self.find_spec_idx_for_dataclass_field_name(name)
+            ]
+        except error.VariableNotSpecified:
+            pass
+
+        raise first_error
 
     def find_spec_idx_for_var(self, var: Var) -> int:
         return self.find_spec_idx_for_var_name(var.name)
@@ -299,6 +432,16 @@ class _VarSpecRepository:
         raise error.VariableNotSpecified(
             f"No field for dotenv variable '{name}' is specified in the dataclass!"
         ) 
+
+    def find_spec_idx_for_dataclass_field_name(self, name: str) -> int:
+        try:
+            return self._dataclass_field_names_to_spec_indices[name]
+        except KeyError:
+            pass
+
+        raise error.VariableNotSpecified(
+            f"Dataclass has not field named '{name}'!"
+        )
 
     def __getitem__(self, idx: int) -> _VarSpec:
         return self._specs[idx]
@@ -334,6 +477,16 @@ class _VarSpecRepository:
                 and spec.target_strategy.ignore_case
             ):
                 map_[spec.dotenv_var_name.lower()] = idx
+
+        return map_
+
+    def _create_dataclass_field_names_to_spec_indices_map(
+            self,
+            specs: list[_VarSpec],
+    ) -> dict[str, int]:
+        map_: dict[str, int] = {}
+        for idx, spec in enumerate(specs):
+            map_[spec.dataclass_field_name] = idx
 
         return map_
 
@@ -373,9 +526,9 @@ def _create_validator_and_converter_spec(
         user_input: tuple[
             tuple[Literal["check"], Callable[[Any], bool]] | Type[_T],
             Callable[[str], _T],
-        ] | _Datadotenv.HandleType[_T],
+        ] | _Datadotenv.ConvertType[_T],
 ) -> _ValidatorAndConverterSpec:
-    if isinstance(user_input, _Datadotenv.HandleType):
+    if isinstance(user_input, _Datadotenv.ConvertType):
         type_matcher = user_input.type_matcher
         convert_str_to_type = user_input.convert_str_to_type
         default_if_unset = user_input.default_if_unset
@@ -430,16 +583,7 @@ def _create_validator_and_converter_spec(
             value = convert_str_to_type(var.value)
 
         if validate is not None:
-            validate_res = validate(value)
-            if validate_res is False:
-                raise error.InvalidValue(
-                    f"The dotenv variable '{var.name}'s "
-                    f"value is invalid '{var.value}'!"
-                )
-            elif validate_res is str:
-                raise error.InvalidValue(validate_res)
-            elif isinstance(validate_res, Exception):
-                raise validate_res
+            _resolve_user_validate(validate)(var, value)
 
         return value
 
@@ -449,13 +593,71 @@ def _create_validator_and_converter_spec(
     )
 
 
+def _resolve_user_validate(
+        user_validate: Callable[[_T], bool | str | Exception | None],
+) -> Callable[[Var, _T], None]:
+
+    def validate(var: Var, value: _T, /) -> None:
+        validate_res = user_validate(value)
+        if validate_res is False:
+            raise error.InvalidValue(
+                f"The dotenv variable '{var.name}'s "
+                f"value is invalid '{var.value}'!"
+            )
+        elif type(validate_res) is str:
+            raise error.InvalidValue(validate_res)
+        elif isinstance(validate_res, Exception):
+            raise validate_res
+        elif validate_res is True or validate_res is None:
+            return
+
+        raise TypeError(
+            f"Custom validator '{user_validate.__qualname__}' "
+            f"for dotenv variable '{var.name}={var.value}' "
+            f"returned unexpected value '{validate_res}'. "
+            f"Custom validators should return 'True', 'False', "
+            f"a string, 'None' or an exception!"
+        )
+
+    return validate
+
+
 def _choose_validator_and_converter(
         var_spec: _VarSpec[Any],
         type_: Any,
         custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
 ) -> Callable[[Var], Any]:
+    if var_spec.custom_validate is not None:
+        custom_validate = var_spec.custom_validate
+        
+        def validate_and_convert(var: Var, /) -> Any:
+            var_spec_without_custom_validate_kwargs = dataclasses.asdict(var_spec)
+            var_spec_without_custom_validate_kwargs["custom_validate"] = None
+            var_spec_without_custom_validate = type(var_spec)(
+                **var_spec_without_custom_validate_kwargs
+            )
+
+            value = _choose_validator_and_converter(
+                var_spec_without_custom_validate,
+                type_,
+                custom_validator_and_converter_specs,
+            )(var)
+
+            custom_validate(var, value)
+
+            return value
+
+        return validate_and_convert
+
     if type(type_) is str:
         type_ = eval(type_)
+
+    if var_spec.custom_convert is not None:
+        return var_spec.custom_convert
+        
+    for validator_and_converter_spec in custom_validator_and_converter_specs:
+        if validator_and_converter_spec.check_type_matches(type_):
+            return validator_and_converter_spec.validate_and_convert
 
     if type_ is bool:
         return _validate_and_convert_bool
@@ -494,9 +696,6 @@ def _choose_validator_and_converter(
     elif type_ is str:
         return _validate_and_convert_str
     else:
-        for validator_and_converter_spec in custom_validator_and_converter_specs:
-            if validator_and_converter_spec.check_type_matches(type_):
-                return validator_and_converter_spec.validate_and_convert
         raise error.NotImplemented(
             "No handling for type of dataclass field "
             f"'{var_spec.dataclass_field_name}: {type_.__name__}'!"

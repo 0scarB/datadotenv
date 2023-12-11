@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import cast, Literal, NewType, Optional, Union
@@ -217,7 +218,7 @@ class TestDatadotenv(TestCase):
 
         with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
             datadotenv(MyDotenv).from_str("\n".join([
-                'TIME="198x-11-09 19:00"'
+                'TIME="198x-11-09 19:00"',
             ])),
         self.assertEqual(
             str(err_ctx.exception), 
@@ -239,7 +240,7 @@ class TestDatadotenv(TestCase):
 
         with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
             datadotenv(MyDotenv).from_str("\n".join([
-                'DAY="198x-11-09"'
+                'DAY="198x-11-09"',
             ])),
         self.assertEqual(
             str(err_ctx.exception), 
@@ -261,7 +262,7 @@ class TestDatadotenv(TestCase):
 
         with self.assertRaises(datadotenv.error.CannotParse):
             datadotenv(MyDotenv).from_str("\n".join([
-                'DELTA="1h 30n"'
+                'DELTA="1h 30n"',
             ])),
 
     def test_supports_different_casing_options(self):
@@ -363,6 +364,130 @@ class TestDatadotenv(TestCase):
             MyDotenv(var="foo")
         )
 
+    def test_can_validate_fields_with_validate_parameter(self):
+        
+        @dataclass
+        class MyDotenv:
+            system_port: int
+            ephemeral_port: int
+
+        def is_positive(x: int) -> bool:
+            return x >= 0
+
+        def validate_not_reserved_for_database(port: int) -> str | None:
+            if port == 5432:
+                return "Reserved for postgreSQL database!"
+
+        spec = datadotenv(
+            MyDotenv,
+            validate=[
+                ("system_port", lambda port: port < 1024),
+                ("ephemeral_port", lambda port: 1023 < port < 65536),
+                ("system_port", is_positive),
+                ("ephemeral_port", is_positive),
+                ("ephemeral_port", validate_not_reserved_for_database),
+            ]
+        )
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=8080",
+            ])),
+            MyDotenv(
+                system_port=80,
+                ephemeral_port=8080,
+            )
+        )
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=8080",
+                "EPHEMERAL_PORT=8080",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=80",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=-1",
+                "EPHEMERAL_PORT=80",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue) as err_ctx:
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=5432",
+            ]))
+        self.assertEqual(
+            str(err_ctx.exception),
+            "Reserved for postgreSQL database!"
+        )
+
+    def test_can_validate_fields_with_validate_method_chaining(self):
+        
+        @dataclass
+        class MyDotenv:
+            system_port: int
+            ephemeral_port: int
+
+        def is_positive(x: int) -> bool:
+            return x >= 0
+
+        def validate_not_reserved_for_database(port: int) -> str | None:
+            if port == 5432:
+                return "Reserved for postgreSQL database!"
+
+        spec = datadotenv(MyDotenv)\
+            .validate("system_port", lambda port: port < 1024)\
+            .validate("ephemeral_port", lambda port: 1023 < port < 65536)\
+            .validate("system_port", is_positive)\
+            .validate("ephemeral_port", is_positive)\
+            .validate("ephemeral_port", validate_not_reserved_for_database)
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=8080",
+            ])),
+            MyDotenv(
+                system_port=80,
+                ephemeral_port=8080,
+            )
+        )
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=8080",
+                "EPHEMERAL_PORT=8080",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=80",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=-1",
+                "EPHEMERAL_PORT=80",
+            ]))
+
+        with self.assertRaises(datadotenv.error.InvalidValue) as err_ctx:
+            spec.from_str("\n".join([
+                "SYSTEM_PORT=80",
+                "EPHEMERAL_PORT=5432",
+            ]))
+        self.assertEqual(
+            str(err_ctx.exception),
+            "Reserved for postgreSQL database!"
+        )
+
     def test_can_convert_custom_types_with_handle_types_parameter(self):
 
         class CustomClass:
@@ -383,12 +508,12 @@ class TestDatadotenv(TestCase):
         SystemPort = NewType("SystemPort", int)
         EphemeralPort = NewType("EphemalPort", int)
 
-        system_port_type_handler = datadotenv.HandleType(
+        system_port_type_converter = datadotenv.ConvertType(
             SystemPort,
             lambda s: int(s),
             validate=lambda port: port < 1024,
         )
-        ephemeral_port_type_handler = datadotenv.HandleType(
+        ephemeral_port_type_converter = datadotenv.ConvertType(
             EphemeralPort,
             lambda s: int(s),
             validate=lambda port: 1024 < port < 65536,
@@ -410,16 +535,16 @@ class TestDatadotenv(TestCase):
         self.assertEqual(
             datadotenv(
                 MyDotenv, 
-                handle_types=[
+                convert_types=[
                     (CustomClass, lambda _: custom_cls_insts.pop(0)),
                     (
                         Fraction, 
                         lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))
                     ),
                     (CustomType, lambda _: "CustomType"),
-                    system_port_type_handler,
-                    ephemeral_port_type_handler,
-                    datadotenv.HandleType(
+                    system_port_type_converter,
+                    ephemeral_port_type_converter,
+                    datadotenv.ConvertType(
                         IntDefaultMinusOne, 
                         lambda s: int(s),
                         default_if_unset=cast(IntDefaultMinusOne, -1),
@@ -455,9 +580,9 @@ class TestDatadotenv(TestCase):
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(
                 MyDotenv,
-                handle_types=[
-                    system_port_type_handler,
-                    ephemeral_port_type_handler,
+                convert_types=[
+                    system_port_type_converter,
+                    ephemeral_port_type_converter,
                 ],
             ).from_str("\n".join([
                 'SYSTEM_PORT=8080',
@@ -467,16 +592,16 @@ class TestDatadotenv(TestCase):
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(
                 MyDotenv, 
-                handle_types=[
-                    system_port_type_handler,
-                    ephemeral_port_type_handler,
+                convert_types=[
+                    system_port_type_converter,
+                    ephemeral_port_type_converter,
                 ],
             ).from_str("\n".join([
                 'SYSTEM_PORT=80',
                 'EPHEMERAL_PORT=80',
             ]))
 
-    def test_can_convert_custom_types_with_handle_type_method_chaining(self):
+    def test_can_convert_custom_types_with_convert_type_method_chaining(self):
         
         class CustomClass:
             pass
@@ -511,17 +636,17 @@ class TestDatadotenv(TestCase):
 
         self.assertEqual(
             datadotenv(MyDotenv)\
-                .handle_type(CustomClass, lambda _: custom_cls_insts.pop(0))\
-                .handle_type(
+                .convert_type(CustomClass, lambda _: custom_cls_insts.pop(0))\
+                .convert_type(
                     Fraction, 
                     lambda s: Fraction(int(s.split("/")[0]), int(s.split("/")[1]))
                 )\
-                .handle_type(CustomType, lambda _: "CustomType")\
-                .handle_type(
+                .convert_type(CustomType, lambda _: "CustomType")\
+                .convert_type(
                     ("check", lambda t: t in {SystemPort, EphemeralPort}),
                     lambda s: int(s),
                 )\
-                .handle_type(
+                .convert_type(
                     IntDefaultMinusOne, 
                     lambda s: int(s), 
                     default_if_unset=cast(IntDefaultMinusOne, -1)
@@ -555,11 +680,11 @@ class TestDatadotenv(TestCase):
 
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(MyDotenv)\
-                .handle_type(
+                .convert_type(
                     SystemPort,
                     lambda s: int(s),
                     validate=lambda port: port < 1024,
-                ).handle_type(
+                ).convert_type(
                     EphemeralPort,
                     lambda s: int(s),
                     validate=lambda port: 1023 < port < 65536,
@@ -570,11 +695,11 @@ class TestDatadotenv(TestCase):
 
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(MyDotenv)\
-                .handle_type(
+                .convert_type(
                     SystemPort,
                     lambda s: int(s),
                     validate=lambda port: port < 1024,
-                ).handle_type(
+                ).convert_type(
                     EphemeralPort,
                     lambda s: int(s),
                     validate=lambda port: 1023 < port < 65536,
@@ -582,6 +707,102 @@ class TestDatadotenv(TestCase):
                     'SYSTEM_PORT=80',
                     'EPHEMERAL_PORT=80',
                 ]))
+
+    def test_can_convert_fields_using_convert_parameter(self):
+
+        @dataclass
+        class MyDotenv:
+            decimal: Decimal
+            positive_decimal: Decimal
+
+        spec = datadotenv(
+            MyDotenv,
+            convert=[
+                ("decimal", lambda s: Decimal(s)),
+                datadotenv.Convert(
+                    "positive_decimal",
+                    lambda s: Decimal(s),
+                    validate=lambda x: x >= 0,
+                )
+            ]
+        )
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'DECIMAL=-3.14',
+                'POSITIVE_DECIMAL=3.14',
+            ])),
+            MyDotenv(
+                decimal=Decimal("-3.14"),
+                positive_decimal=Decimal("3.14"),
+            ),
+        )
+
+        # Test validate argument
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                'DECIMAL=-3.14',
+                'POSITIVE_DECIMAL=-3.14',
+            ]))
+
+        # Test does not allow duplicates in convert
+        with self.assertRaises(ValueError):
+            spec = datadotenv(
+                MyDotenv,
+                convert=[
+                    ("decimal", lambda s: Decimal(s)),
+                    datadotenv.Convert(
+                        "positive_decimal",
+                        lambda s: Decimal(s),
+                        validate=lambda x: x >= 0,
+                    ),
+                    ("positive_decimal", lambda s: s),
+                ]
+            )
+
+    def test_can_convert_fields_using_convert_method_chaining(self):
+
+        @dataclass
+        class MyDotenv:
+            decimal: Decimal
+            positive_decimal: Decimal
+
+        spec = datadotenv(MyDotenv)\
+            .convert("decimal", lambda s: Decimal(s))\
+            .convert(
+                "positive_decimal",
+                lambda s: Decimal(s),
+                validate=lambda x: x >= 0,
+            )
+
+        self.assertEqual(
+            spec.from_str("\n".join([
+                'DECIMAL=-3.14',
+                'POSITIVE_DECIMAL=3.14',
+            ])),
+            MyDotenv(
+                decimal=Decimal("-3.14"),
+                positive_decimal=Decimal("3.14"),
+            ),
+        )
+
+        # Test validate argument
+        with self.assertRaises(datadotenv.error.InvalidValue):
+            spec.from_str("\n".join([
+                'DECIMAL=-3.14',
+                'POSITIVE_DECIMAL=-3.14',
+            ]))
+
+        # Test does not allow duplicates in convert
+        with self.assertRaises(ValueError):
+            spec = datadotenv(MyDotenv)\
+                .convert("decimal", lambda s: Decimal(s))\
+                .convert(
+                  "positive_decimal",
+                  lambda s: Decimal(s),
+                  validate=lambda x: x >= 0,
+                )\
+                .convert("positive_decimal", lambda s: s)
 
 
 class TestParseDotenvFromCharsIter(TestCase):
