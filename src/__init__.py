@@ -48,6 +48,8 @@ class _Datadotenv:
         allow_incomplete: bool = False,
         file_paths_must_exist: bool = True,
         resolve_file_paths: bool = True,
+        sequence_separator: str = ",",
+        trim_sequence_items: bool = True,
         retarget: Iterable[tuple[str, str]] | None = None,
         validate: \
             Iterable[
@@ -83,6 +85,8 @@ class _Datadotenv:
                 ),
                 custom_convert=None,
                 custom_validate=None,
+                sequence_separator=sequence_separator,
+                trim_sequence_items=trim_sequence_items,
             ))
 
         custom_validators_and_converters_specs: list[_ValidatorAndConverterSpec] = []
@@ -195,6 +199,8 @@ class _VarSpec(Generic[_T]):
     file_path_config: _VarSpecFilePathConfig
     custom_convert: Callable[[Var], _T] | None
     custom_validate: Callable[[Var, _T], None] | None
+    sequence_separator: str
+    trim_sequence_items: bool
 
 
 @dataclass
@@ -683,6 +689,20 @@ def _choose_validator_and_converter(
         return _validate_and_convert_float
     elif isinstance(type_, types.NoneType):
         return _validate_and_convert_unset
+    
+    origin_type = typing.get_origin(type_)
+    if origin_type is list:
+        return _create_validate_and_convert_list(
+            var_spec,
+            type_,
+            custom_validator_and_converter_specs,
+        )
+    elif origin_type is tuple:
+        return _create_validate_and_convert_tuple(
+            var_spec,
+            type_,
+            custom_validator_and_converter_specs,
+        )
     elif isinstance(type_, types.UnionType) or getattr(type_, "__name__") == "Union":
         return _create_validate_and_convert_union(
             var_spec, 
@@ -714,7 +734,7 @@ def _choose_validator_and_converter(
     else:
         raise error.NotImplemented(
             "No handling for type of dataclass field "
-            f"'{var_spec.dataclass_field_name}: {type_.__name__}'!"
+            f"'{var_spec.dataclass_field_name}: {var_spec.dataclass_field_type}'!"
         )
 
 
@@ -766,6 +786,114 @@ def _validate_and_convert_unset(var: Var) -> None:
     raise error.CannotConvertToType(
         f"Expected dotenv varibale '{var.name}' to be unset, not '{var.value}'!"
     )
+
+
+def _create_validate_and_convert_list(
+        var_spec: _VarSpec[Any], 
+        list_type: Type[list[_T]],
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
+) -> Callable[[Var], list[_T]]:
+    type_args = typing.get_args(list_type)
+    if len(type_args) != 1:
+        raise TypeError(
+            "List type in dataclass field "
+            f"'{var_spec.dataclass_field_name}: {var_spec.dataclass_field_type}' "
+            "must have a single item type 'list[<item type>]', "
+            f"not {len(type_args)}!"
+        )
+    
+    item_type = type_args[0]
+    validate_and_convert_item = _choose_validator_and_converter(
+        var_spec,
+        item_type,
+        custom_validator_and_converter_specs,
+    )
+    
+    def validate_and_convert(var: Var) -> list[_T]:
+        if var.value is None:
+            return []
+
+        str_value = var.value
+            
+        if var_spec.trim_sequence_items:
+            str_value = str_value.strip()
+
+        list_value: list[_T] = []
+        item_strs = str_value.split(var_spec.sequence_separator)
+        for item_str in item_strs:
+            if var_spec.trim_sequence_items:
+                item_str = item_str.strip()
+            list_value.append(
+                validate_and_convert_item(Var(var.name, item_str))
+            )
+
+        return list_value
+
+    return validate_and_convert
+
+
+def _create_validate_and_convert_tuple(
+        var_spec: _VarSpec[Any], 
+        tuple_type: Type[tuple[_T, ...]],
+        custom_validator_and_converter_specs: list[_ValidatorAndConverterSpec[Any]],
+) -> Callable[[Var], tuple[_T, ...]]:
+    item_types = typing.get_args(tuple_type)
+    item_validator_and_converters: list[Callable[[Var], _T]] = []
+    for item_type in item_types:
+        if item_type is Ellipsis:
+            raise TypeError(
+                    "Ellipsis in tuples '...', found in dataclass field "
+                    f"'{var_spec.dataclass_field_name}: {var_spec.dataclass_field_type}', "
+                    "are currently unsupported by datadotenv! "
+                    "Feel free to submit a PR/issue :)"
+            )
+        validate_and_convert_item = _choose_validator_and_converter(
+            var_spec,
+            item_type,
+            custom_validator_and_converter_specs,
+        )
+        item_validator_and_converters.append(
+            validate_and_convert_item
+        )
+    
+    def validate_and_convert(var: Var) -> tuple[_T, ...]:
+        if var.value is None:
+            return ()
+
+        str_value = var.value
+
+        if var_spec.trim_sequence_items:
+            str_value = str_value.strip()
+
+        item_strs = str_value.split(var_spec.sequence_separator)
+
+        expected_item_count = len(item_types)
+        actual_item_count = len(item_strs)
+        if actual_item_count > expected_item_count:
+            raise error.InvalidValue(
+                f"Dotenv varibale '{var.name}' lists too many items "
+                f"(separated by '{var_spec.sequence_separator}'). "
+                f"Expected {expected_item_count}, got {actual_item_count}!"
+            )
+        elif actual_item_count < expected_item_count:
+            raise error.InvalidValue(
+                f"Dotenv varibale '{var.name}' lists too few items "
+                f"(separated by '{var_spec.sequence_separator}'). "
+                f"Expected {expected_item_count}, got {actual_item_count}!"
+            )
+
+        tuple_items: list[_T] = []
+        for item_str, validate_and_convert_item in zip(
+                item_strs,
+                item_validator_and_converters,
+        ):
+            if var_spec.trim_sequence_items:
+                item_str = item_str.strip()
+            tuple_items.append(validate_and_convert_item(Var(var.name, item_str)))
+
+        return tuple(tuple_items)
+
+    return validate_and_convert
 
 
 def _create_validate_and_convert_union(

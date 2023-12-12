@@ -51,6 +51,91 @@ class TestDatadotenv(TestCase):
             )
         )
 
+    def test_instantiates_dataclass_with_sequence_types(self):
+
+        @dataclass
+        class MyDotenv:
+            list1: list[str]
+            list2: list[bool]
+            list3: list[int]
+            list4: list[float]
+            list5: list[str]
+            same_type_tuple: tuple[float, float]
+            multi_type_tuple: tuple[int, float, str]
+            single_value_tuple: tuple[bool]
+
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("\n".join([
+                # Test empty list
+                'LIST1=',
+                # Test list with single value
+                'LIST2=True',
+                # Test multi value list
+                'LIST3="1, 2,3"',
+                'LIST4=1,2,3',
+                # Test list with empty str
+                'LIST5=""',
+                'SAME_TYPE_TUPLE=1,0.5',
+                'MULTI_TYPE_TUPLE="1, 0.5, foo"',
+                'SINGLE_VALUE_TUPLE=False',
+            ])),
+            MyDotenv(
+                list1=[],
+                list2=[True],
+                list3=[1, 2, 3],
+                list4=[1., 2., 3.],
+                list5=[""],
+                same_type_tuple=(1., 0.5),
+                multi_type_tuple=(1, 0.5, "foo"),
+                single_value_tuple=(False,),
+            )
+        )
+
+        # Test alternate separator
+        self.assertEqual(
+            datadotenv(MyDotenv, sequence_separator="|").from_str("\n".join([
+                # Test empty list
+                'LIST1=',
+                # Test list with single value
+                'LIST2=True',
+                # Test multi value list
+                'LIST3="1| 2|3"',
+                'LIST4=1|2|3',
+                # Test list with empty str
+                'LIST5=""',
+                'SAME_TYPE_TUPLE=1|0.5',
+                'MULTI_TYPE_TUPLE="1| 0.5| foo"',
+                'SINGLE_VALUE_TUPLE=False',
+            ])),
+            MyDotenv(
+                list1=[],
+                list2=[True],
+                list3=[1, 2, 3],
+                list4=[1., 2., 3.],
+                list5=[""],
+                same_type_tuple=(1., 0.5),
+                multi_type_tuple=(1, 0.5, "foo"),
+                single_value_tuple=(False,),
+            )
+        )
+
+        # Test trim_sequence_items works as expected
+        @dataclass
+        class MyDotenv:
+            tup: tuple[str, str]
+        self.assertEqual(
+            datadotenv(MyDotenv).from_str("TUP='foo, bar'"),
+            MyDotenv(tup=("foo", "bar")),
+        )
+        self.assertEqual(
+            datadotenv(MyDotenv, trim_sequence_items=True).from_str("TUP='foo, bar'"),
+            MyDotenv(tup=("foo", "bar")),
+        )
+        self.assertEqual(
+            datadotenv(MyDotenv, trim_sequence_items=False).from_str("TUP='foo, bar'"),
+            MyDotenv(tup=("foo", " bar")),
+        )
+
     def test_instantiates_dataclass_with_literal_types(self):
 
         @dataclass(frozen=True)
