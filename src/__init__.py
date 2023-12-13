@@ -3,22 +3,25 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 import datetime
+import inspect
+import os
 from pathlib import Path
 import types
 import typing
 from typing import (
-    Any, 
-    Callable, 
-    cast, 
-    ClassVar, 
-    Generic, 
-    Iterable, 
-    Iterator, 
-    Literal, 
-    Protocol, 
+    Any,
+    Callable,
+    cast,
+    ClassVar,
+    Generic,
+    Iterable,
+    Iterator,
+    Literal,
+    Mapping,
+    Protocol,
     Self,
-    Type, 
-    TypeAlias, 
+    Type,
+    TypeAlias,
     TypeVar,
 )
 
@@ -35,6 +38,9 @@ _TDataclass = TypeVar("_TDataclass", bound=_Dataclass)
 
 
 _Casing: TypeAlias = Literal["upper", "lower", "preserve", "ignore"]
+
+
+_DotenvSource: TypeAlias = Path | str | Iterable[str] | Mapping[str, str]
 
 
 class _Datadotenv:
@@ -230,15 +236,178 @@ class _Spec(Generic[_TDataclass]):
         self._custom_validators_and_converters_specs = \
             custom_validators_and_converters_specs
 
-    def from_chars_iter(
-            self,
-            chars: Iterable[str],
-    ) -> _TDataclass:
+    def from_(self, *sources: _DotenvSource) -> _TDataclass:
+        # Populate key-value dictionary with dotenv variable
+        # names and values.
+        dotenv_var_name_to_value: dict[str, str | None] = {}
+        for source in sources:
+            # Convert string sources that look like paths
+            # to pathlib.Path objects.
+            if (
+                type(source) is str 
+                and (
+                    ('=' not in source and '/' in source)
+                    or '/' in source.split('=')[0]
+                    or source == '<git-root>'
+                    or source == '<git_root>'
+                    or source == '<git root>'
+                    or source == '<gitroot>'
+                )
+            ):
+                resolved_path: bool = False
+
+                for git_root_placeholder in (
+                    '<git-root>',
+                    '<git_root>',
+                    '<git root>',
+                    '<gitroot>',
+                ):
+                    if not source.startswith(git_root_placeholder):
+                        continue
+
+                    # Attempt to get the caller file name.
+                    # Source: https://stackoverflow.com/questions/13699283/how-to-get-the-callers-filename-method-name-in-python
+                    caller_file_path_or_cwd: Path
+                    try:
+                        caller_file_path_or_cwd = Path(inspect.stack()[1].filename)
+                    except:
+                        # Fall back on current working directory
+                        caller_file_path_or_cwd = Path(os.getcwd())
+
+                    # Find the git root directory in ancestor directories
+                    git_root_path = caller_file_path_or_cwd
+                    while True:
+                        if git_root_path.is_dir():
+                            for dir_entry in git_root_path.iterdir():
+                                if dir_entry.name == ".git" and dir_entry.is_dir():
+                                    rel_path = str(source).removeprefix(
+                                        git_root_placeholder,
+                                    )
+                                    source = git_root_path / rel_path.removeprefix("/")
+                                    resolved_path = True
+                                    break
+
+                        if resolved_path:
+                            break
+
+                        parent_dir_path = git_root_path.parent
+                        if git_root_path == parent_dir_path:
+                            raise error.NoGitRootDirectory(
+                                "Could not find a git repository root directory "
+                                "(a directory containing a '.git/' sub-directory) "
+                                f"starting from '{caller_file_path_or_cwd}'!"
+                            )
+                        git_root_path = parent_dir_path
+
+                    if resolved_path:
+                        break
+
+                if not resolved_path:
+                    source = Path(source)
+
+            if isinstance(source, Path):
+                # Handle file paths
+                if source.is_file():
+                    file_content: str
+                    try:
+                        with open(source) as f:
+                            file_content = f.read()
+                    except FileNotFoundError:
+                        raise error.FilePathDoesNotExist(
+                            f"Expected file '{source}' to be a dotenv file "
+                            "but it does not exist!"
+                        )
+                    for var in parse.dotenv_from_chars_iter(file_content):
+                        dotenv_var_name_to_value[var.name] = var.value
+                # Handle directory paths
+                elif source.is_dir():
+                    found_dotenv_file_in_dir: bool = False
+                    # Parse contents from .env file in directory
+                    # or files starting with '.env.'.
+                    for file_path in sorted(
+                            source.iterdir(),
+                            key=lambda file_path: file_path.name
+                    ):
+                        if (
+                            file_path.is_file()
+                            and (
+                                file_path.name == ".env"
+                                or file_path.name.startswith(".env.")
+                            )
+                        ):
+                            file_content: str
+                            with open(file_path) as f:
+                                file_content = f.read()
+                            for var in parse.dotenv_from_chars_iter(file_content):
+                                dotenv_var_name_to_value[var.name] = var.value
+                            found_dotenv_file_in_dir = True
+                    if not found_dotenv_file_in_dir:
+                        raise error.NoDotenvInDirectory(
+                            "No .env file or files starting with '.env.' found "
+                            f"in directory '{source}'!"
+                        )
+                else:
+                    raise error.FilePathDoesNotExist(
+                        "'datadotenv.from_' currently only supports paths to "
+                        "files or directories!"
+                    )
+            # Handle strings
+            elif type(source) is str:
+                # Treat string as a the content of a dotenv file
+                for var in parse.dotenv_from_chars_iter(source):
+                    dotenv_var_name_to_value[var.name] = var.value
+            # Handle mapping types -- e.g. dicts
+            elif isinstance(source, Mapping):
+                for key, value in source.items():
+                    if type(key) is not str:
+                        raise error.MappingTypeError(
+                            "'datadotenv.from_' only accepts mapping types "
+                            "(e.g. instances of 'dict') with string keys. "
+                            f"Found non-string key '{key}' "
+                            f"of type '{getattr(type(key), '__name__', type(key))}'!"
+                        )
+                    if value is not None and type(value) is not str:
+                        raise error.MappingTypeError(
+                            "'datadotenv.from_' only accepts mapping types "
+                            "(e.g. instances of 'dict') with string or 'None' values. "
+                            f"Found non string or 'None' vaue '{value}' "
+                            f"of type '{getattr(type(value), '__name__', type(value))}'!"
+                        )
+                    dotenv_var_name_to_value[key] = value
+            # Handle iterables
+            elif hasattr(source, "__iter__"):
+                # Treat iterables as the lines from a dotenv file
+                lines: list[str] = [] 
+                for line in cast(Iterable, source):
+                    if type(line) is not str:
+                        raise error.LinesTypeError(
+                            "'datadotenv.from_' treats iterables as lines "
+                            "in a dotenv file. "
+                            f"The iterable '{source}' produced a non-string "
+                            f"line (item) '{line}' "
+                            f"of type '{getattr(type(line), '__name__', type(line))}'!"
+                        )
+                    lines.append(line)
+                dotenv_content: str = "\n".join(lines)
+                for var in parse.dotenv_from_chars_iter(dotenv_content):
+                    dotenv_var_name_to_value[var.name] = var.value
+            else:
+                raise error.TypeError(
+                    f"'datadotenv.from_' accepts instances of "
+                    "'pathlib.Path', string paths, "
+                    "a string of a dotenv file content or an iterable of its lines "
+                    "or mapping types such as dictionaries as sources. "
+                    f"Recieved source '{source}' with unknown type "
+                    f"'{getattr(type(source), '__name__', type(source))}'!"
+                )
+
+        # Populated dataclass kwargs, create and return dataclass.
         var_spec_resolve_group = _VarSpecResolveGroup(self._var_specs)
 
         dataclass_kwargs: dict[str, Any] = {}
 
-        for var in parse.dotenv_from_chars_iter(chars):
+        for var_name, var_value in dotenv_var_name_to_value.items():
+            var = Var(var_name, var_value)
             try:
                 var_spec = (
                     var_spec_resolve_group
@@ -269,9 +438,6 @@ class _Spec(Generic[_TDataclass]):
         )
         
         return self._datacls(**dataclass_kwargs)
-
-    def from_str(self, s: str) -> _TDataclass:
-        return self.from_chars_iter(s)
 
     def retarget(self, old_name: str, new_name: str, /) -> Self:
         spec = self._var_specs.find_spec_by_dotenv_var_name_or_dataclass_field_name(
@@ -1443,51 +1609,57 @@ class _Error:
 
     _GlobalValueError = ValueError
 
+    _GlobalTypeError = TypeError
+
     class Error(Exception):
         pass
-
 
     class ValueError(Error, _GlobalValueError):
         pass
 
+    class TypeError(Error, _GlobalTypeError):
+        pass
 
     class CannotParse(ValueError):
         pass
 
-
     class InvalidLetterCase(ValueError):
         pass
-
 
     class VariableNotSpecified(Error, AttributeError):
         pass
 
-
     class VariableMissing(ValueError):
         pass
-
 
     class VariableDuplicate(ValueError):
         pass
 
-
     class VariableUnset(ValueError):
         pass
-
 
     class CannotConvertToType(ValueError):
         pass
 
-
     class NotImplemented(Error, NotImplementedError):
         pass
-
 
     class FilePathDoesNotExist(Error, FileNotFoundError):
         pass
 
+    class NoDotenvInDirectory(Error, FileNotFoundError):
+        pass
+
+    class NoGitRootDirectory(Error, FileNotFoundError):
+        pass
 
     class InvalidValue(ValueError):
+        pass
+
+    class MappingTypeError(TypeError):
+        pass
+
+    class LinesTypeError(TypeError):
         pass
 
 

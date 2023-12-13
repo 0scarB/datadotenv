@@ -1,9 +1,12 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from contextlib import contextmanager
 from fractions import Fraction
+import os
 from pathlib import Path
-from typing import cast, Literal, NewType, Optional, Union
+import shutil
+from typing import cast, Generator, Literal, NewType, Optional, Union, TypeAlias
 import unittest
 from unittest import TestCase
 
@@ -29,7 +32,7 @@ class TestDatadotenv(TestCase):
         spec = datadotenv(MyDotenv)
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'STR_VAR="foo"',
                 'BOOL_VAR1=True',
                 "BOOL_VAR2='true'",
@@ -38,7 +41,7 @@ class TestDatadotenv(TestCase):
                 'INT_VAR=42',
                 'FLOAT_VAR=3.14',
                 'UNSET_VAR=',
-            ])),
+            ]),
             MyDotenv(
                 str_var="foo",
                 bool_var1=True,
@@ -65,7 +68,7 @@ class TestDatadotenv(TestCase):
             single_value_tuple: tuple[bool]
 
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 # Test empty list
                 'LIST1=',
                 # Test list with single value
@@ -78,7 +81,7 @@ class TestDatadotenv(TestCase):
                 'SAME_TYPE_TUPLE=1,0.5',
                 'MULTI_TYPE_TUPLE="1, 0.5, foo"',
                 'SINGLE_VALUE_TUPLE=False',
-            ])),
+            ]),
             MyDotenv(
                 list1=[],
                 list2=[True],
@@ -93,7 +96,7 @@ class TestDatadotenv(TestCase):
 
         # Test alternate separator
         self.assertEqual(
-            datadotenv(MyDotenv, sequence_separator="|").from_str("\n".join([
+            datadotenv(MyDotenv, sequence_separator="|").from_([
                 # Test empty list
                 'LIST1=',
                 # Test list with single value
@@ -106,7 +109,7 @@ class TestDatadotenv(TestCase):
                 'SAME_TYPE_TUPLE=1|0.5',
                 'MULTI_TYPE_TUPLE="1| 0.5| foo"',
                 'SINGLE_VALUE_TUPLE=False',
-            ])),
+            ]),
             MyDotenv(
                 list1=[],
                 list2=[True],
@@ -124,15 +127,15 @@ class TestDatadotenv(TestCase):
         class MyDotenv:
             tup: tuple[str, str]
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("TUP='foo, bar'"),
+            datadotenv(MyDotenv).from_("TUP='foo, bar'"),
             MyDotenv(tup=("foo", "bar")),
         )
         self.assertEqual(
-            datadotenv(MyDotenv, trim_sequence_items=True).from_str("TUP='foo, bar'"),
+            datadotenv(MyDotenv, trim_sequence_items=True).from_("TUP='foo, bar'"),
             MyDotenv(tup=("foo", "bar")),
         )
         self.assertEqual(
-            datadotenv(MyDotenv, trim_sequence_items=False).from_str("TUP='foo, bar'"),
+            datadotenv(MyDotenv, trim_sequence_items=False).from_("TUP='foo, bar'"),
             MyDotenv(tup=("foo", " bar")),
         )
 
@@ -146,10 +149,10 @@ class TestDatadotenv(TestCase):
         spec = datadotenv(MyDotenv)
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'LITERAL_VAR1="foo"',
                 'LITERAL_VAR2=42',
-            ])),
+            ]),
             MyDotenv(
                 literal_var1="foo",
                 literal_var2=42,
@@ -174,7 +177,7 @@ class TestDatadotenv(TestCase):
             str_or_path3: str | Path
 
         spec = datadotenv(MyDotenv)
-        datacls = spec.from_str("\n".join([
+        datacls = spec.from_([
             'INT_OR_UNSET1=42',
             'INT_OR_UNSET2=',
             'INT_OR_UNSET3=',
@@ -187,7 +190,7 @@ class TestDatadotenv(TestCase):
             'STR_OR_PATH1="src"',
             'STR_OR_PATH2="non-existent"',
             'STR_OR_PATH3="127.0.0.1"',
-        ]))
+        ])
 
         self.assertEqual(
             datacls,
@@ -224,7 +227,7 @@ class TestDatadotenv(TestCase):
 
         # Test will use defaults when unset
         self.assertEqual(
-            spec.from_str(""),
+            spec.from_(""),
             MyDotenv(
                 str_var="foo",
                 int_var=42,
@@ -236,13 +239,13 @@ class TestDatadotenv(TestCase):
 
         # Test defaults can be overridden when set 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 "STR_VAR=bar",
                 "INT_VAR=420",
                 "FLOAT_VAR=2.71",
                 "NONE_VAR=",
                 "LITERAL_VAR=bar",
-            ])),
+            ]),
             MyDotenv(
                 str_var="bar",
                 int_var=420,
@@ -260,31 +263,31 @@ class TestDatadotenv(TestCase):
 
         # Test raises when non-existent by default
         with self.assertRaises(datadotenv.error.FilePathDoesNotExist):
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'FILE_PATH=./non-existent'
-            ]))
+            ])
 
         # Test resolves path by default
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'FILE_PATH=./src/../src'
-            ])),
+            ]),
             MyDotenv(Path("./src").resolve())
         )
 
         # Test option not not resolve 
         self.assertEqual(
-            datadotenv(MyDotenv, resolve_file_paths=False).from_str("\n".join([
+            datadotenv(MyDotenv, resolve_file_paths=False).from_([
                 'FILE_PATH=./src'
-            ])),
+            ]),
             MyDotenv(Path("./src"))
         )
 
         # Test option to not check existence
         self.assertEqual(
-            datadotenv(MyDotenv, file_paths_must_exist=False).from_str("\n".join([
+            datadotenv(MyDotenv, file_paths_must_exist=False).from_([
                 'FILE_PATH=./non-existent'
-            ])),
+            ]),
             MyDotenv(file_path=Path("./non-existent").resolve())
         )
 
@@ -295,16 +298,16 @@ class TestDatadotenv(TestCase):
             time: datetime
         
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'TIME="1989-11-09 19:00"'
-            ])),
+            ]),
             MyDotenv(datetime(year=1989, month=11, day=9, hour=19)),
         )
 
         with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'TIME="198x-11-09 19:00"',
-            ])),
+            ]),
         self.assertEqual(
             str(err_ctx.exception), 
             "Cannot parse datetime: Invalid isoformat string: '198x-11-09 19:00'"
@@ -317,16 +320,16 @@ class TestDatadotenv(TestCase):
             day: date
         
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'DAY="1989-11-09"'
-            ])),
+            ]),
             MyDotenv(date(year=1989, month=11, day=9)),
         )
 
         with self.assertRaises(datadotenv.error.CannotParse) as err_ctx:
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'DAY="198x-11-09"',
-            ])),
+            ]),
         self.assertEqual(
             str(err_ctx.exception), 
             "Cannot parse date: Invalid isoformat string: '198x-11-09'"
@@ -339,16 +342,16 @@ class TestDatadotenv(TestCase):
             delta: timedelta
         
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'DELTA="1h 30m"'
-            ])),
+            ]),
             MyDotenv(timedelta(hours=1, minutes=30)),
         )
 
         with self.assertRaises(datadotenv.error.CannotParse):
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'DELTA="1h 30n"',
-            ])),
+            ]),
 
     def test_supports_different_casing_options(self):
 
@@ -359,10 +362,10 @@ class TestDatadotenv(TestCase):
         
         # Test defaults to uppercase
         self.assertEqual(
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'NORMAL_CASING=foo',
                 'MIXED_CASING=bar',
-            ])),
+            ]),
             MyDotenv(
                 normal_casing="foo",
                 mixed_CASING="bar",
@@ -371,10 +374,10 @@ class TestDatadotenv(TestCase):
         
         # Test explicit uppercase
         self.assertEqual(
-            datadotenv(MyDotenv, case="upper").from_str("\n".join([
+            datadotenv(MyDotenv, case="upper").from_([
                 'NORMAL_CASING=foo',
                 'MIXED_CASING=bar',
-            ])),
+            ]),
             MyDotenv(
                 normal_casing="foo",
                 mixed_CASING="bar",
@@ -383,10 +386,10 @@ class TestDatadotenv(TestCase):
         
         # Test lowercase
         self.assertEqual(
-            datadotenv(MyDotenv, case="lower").from_str("\n".join([
+            datadotenv(MyDotenv, case="lower").from_([
                 'normal_casing=foo',
                 'mixed_casing=bar',
-            ])),
+            ]),
             MyDotenv(
                 normal_casing="foo",
                 mixed_CASING="bar",
@@ -395,10 +398,10 @@ class TestDatadotenv(TestCase):
         
         # Test preserve casing
         self.assertEqual(
-            datadotenv(MyDotenv, case="preserve").from_str("\n".join([
+            datadotenv(MyDotenv, case="preserve").from_([
                 'normal_casing=foo',
                 'mixed_CASING=bar',
-            ])),
+            ]),
             MyDotenv(
                 normal_casing="foo",
                 mixed_CASING="bar",
@@ -407,10 +410,10 @@ class TestDatadotenv(TestCase):
 
         # Test ignore casing
         self.assertEqual(
-            datadotenv(MyDotenv, case="ignore").from_str("\n".join([
+            datadotenv(MyDotenv, case="ignore").from_([
                 'nOrMaL_cAsInG=foo',
                 'MiXeD_cAsInG=bar',
-            ])),
+            ]),
             MyDotenv(
                 normal_casing="foo",
                 mixed_CASING="bar",
@@ -427,25 +430,25 @@ class TestDatadotenv(TestCase):
 
         # Test default: dataclass must fully describe dotenv
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            datadotenv(MyDotenv).from_str("\n".join([
+            datadotenv(MyDotenv).from_([
                 'VAR=foo',
                 'NOT_DESCRIBED_IN_DATACLASS=bar',
-            ])),
+            ]),
             
         # Test explicit: dataclass must fully describe dotenv
         # using `allow_incomplete=False`
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            datadotenv(MyDotenv, allow_incomplete=False).from_str("\n".join([
+            datadotenv(MyDotenv, allow_incomplete=False).from_([
                 'VAR=foo',
                 'NOT_DESCRIBED_IN_DATACLASS=bar',
-            ]))
+            ])
 
         # Test can accept incomplete dataclass with `allow_incomplete=True` 
         self.assertEqual(
-            datadotenv(MyDotenv, allow_incomplete=True).from_str("\n".join([
+            datadotenv(MyDotenv, allow_incomplete=True).from_([
                 'VAR=foo',
                 'NOT_DESCRIBED_IN_DATACLASS=bar',
-            ])),
+            ]),
             MyDotenv(var="foo")
         )
 
@@ -475,10 +478,10 @@ class TestDatadotenv(TestCase):
         )
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=8080",
-            ])),
+            ]),
             MyDotenv(
                 system_port=80,
                 ephemeral_port=8080,
@@ -486,28 +489,28 @@ class TestDatadotenv(TestCase):
         )
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=8080",
                 "EPHEMERAL_PORT=8080",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=80",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=-1",
                 "EPHEMERAL_PORT=80",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue) as err_ctx:
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=5432",
-            ]))
+            ])
         self.assertEqual(
             str(err_ctx.exception),
             "Reserved for postgreSQL database!"
@@ -535,10 +538,10 @@ class TestDatadotenv(TestCase):
             .validate("ephemeral_port", validate_not_reserved_for_database)
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=8080",
-            ])),
+            ]),
             MyDotenv(
                 system_port=80,
                 ephemeral_port=8080,
@@ -546,28 +549,28 @@ class TestDatadotenv(TestCase):
         )
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=8080",
                 "EPHEMERAL_PORT=8080",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=80",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=-1",
                 "EPHEMERAL_PORT=80",
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue) as err_ctx:
-            spec.from_str("\n".join([
+            spec.from_([
                 "SYSTEM_PORT=80",
                 "EPHEMERAL_PORT=5432",
-            ]))
+            ])
         self.assertEqual(
             str(err_ctx.exception),
             "Reserved for postgreSQL database!"
@@ -589,10 +592,10 @@ class TestDatadotenv(TestCase):
         )
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'SERVER_PORT=443',
                 'SERVER_DOMAIN=example.com',
-            ])),
+            ]),
             MyDotenv(
                 port=443,
                 domain="example.com",
@@ -601,15 +604,15 @@ class TestDatadotenv(TestCase):
 
         # Test that old names are no longer valid
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            spec.from_str("\n".join([
+            spec.from_([
                 'PORT=443',
                 'SERVER_DOMAIN=example.com',
-            ]))
+            ])
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            spec.from_str("\n".join([
+            spec.from_([
                 'SERVER_PORT=443',
                 'DOMAIN=example.com',
-            ]))
+            ])
 
     def test_can_retarget_different_dataclass_fields_with_retarget_method_chaining(self):
 
@@ -623,10 +626,10 @@ class TestDatadotenv(TestCase):
             .retarget("DOMAIN", "SERVER_DOMAIN")
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'SERVER_PORT=443',
                 'SERVER_DOMAIN=example.com',
-            ])),
+            ]),
             MyDotenv(
                 port=443,
                 domain="example.com",
@@ -635,15 +638,15 @@ class TestDatadotenv(TestCase):
 
         # Test that old names are no longer valid
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            spec.from_str("\n".join([
+            spec.from_([
                 'PORT=443',
                 'SERVER_DOMAIN=example.com',
-            ]))
+            ])
         with self.assertRaises(datadotenv.error.VariableNotSpecified):
-            spec.from_str("\n".join([
+            spec.from_([
                 'SERVER_PORT=443',
                 'DOMAIN=example.com',
-            ]))
+            ])
 
     def test_can_convert_custom_types_with_handle_types_parameter(self):
 
@@ -707,7 +710,7 @@ class TestDatadotenv(TestCase):
                         default_if_unset=cast(IntDefaultMinusOne, -1),
                     ),
                 ]
-            ).from_str("\n".join([
+            ).from_([
                 'INST_OF_CUSTOM_CLS=foo',
                 'INST_OF_CUSTOM_CLS2=bar',
                 'FRAC=3/4',
@@ -716,7 +719,7 @@ class TestDatadotenv(TestCase):
                 'DEV_PORT=8080',
                 'CUSTOM_INT1=42',
                 'CUSTOM_INT2=',
-            ])),
+            ]),
             MyDotenv(
                 inst_of_custom_cls=custom_cls_inst,
                 inst_of_custom_cls2=custom_sub_cls_inst,
@@ -741,10 +744,10 @@ class TestDatadotenv(TestCase):
                     system_port_type_converter,
                     ephemeral_port_type_converter,
                 ],
-            ).from_str("\n".join([
+            ).from_([
                 'SYSTEM_PORT=8080',
                 'EPHEMERAL_PORT=8080',
-            ]))
+            ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(
@@ -753,10 +756,10 @@ class TestDatadotenv(TestCase):
                     system_port_type_converter,
                     ephemeral_port_type_converter,
                 ],
-            ).from_str("\n".join([
+            ).from_([
                 'SYSTEM_PORT=80',
                 'EPHEMERAL_PORT=80',
-            ]))
+            ])
 
     def test_can_convert_custom_types_with_convert_type_method_chaining(self):
         
@@ -808,7 +811,7 @@ class TestDatadotenv(TestCase):
                     lambda s: int(s), 
                     default_if_unset=cast(IntDefaultMinusOne, -1)
                 )\
-                .from_str("\n".join([
+                .from_([
                     'INST_OF_CUSTOM_CLS=foo',
                     'INST_OF_CUSTOM_CLS2=bar',
                     'FRAC=3/4',
@@ -817,7 +820,7 @@ class TestDatadotenv(TestCase):
                     'DEV_PORT=8080',
                     'CUSTOM_INT1=42',
                     'CUSTOM_INT2=',
-                ])),
+                ]),
             MyDotenv(
                 inst_of_custom_cls=custom_cls_inst,
                 inst_of_custom_cls2=custom_sub_cls_inst,
@@ -845,10 +848,10 @@ class TestDatadotenv(TestCase):
                     EphemeralPort,
                     lambda s: int(s),
                     validate=lambda port: 1023 < port < 65536,
-                ).from_str("\n".join([
+                ).from_([
                     'SYSTEM_PORT=8080',
                     'EPHEMERAL_PORT=8080',
-                ]))
+                ])
 
         with self.assertRaises(datadotenv.error.InvalidValue):
             datadotenv(MyDotenv)\
@@ -860,10 +863,10 @@ class TestDatadotenv(TestCase):
                     EphemeralPort,
                     lambda s: int(s),
                     validate=lambda port: 1023 < port < 65536,
-                ).from_str("\n".join([
+                ).from_([
                     'SYSTEM_PORT=80',
                     'EPHEMERAL_PORT=80',
-                ]))
+                ])
 
     def test_can_convert_fields_using_convert_parameter(self):
 
@@ -885,10 +888,10 @@ class TestDatadotenv(TestCase):
         )
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'DECIMAL=-3.14',
                 'POSITIVE_DECIMAL=3.14',
-            ])),
+            ]),
             MyDotenv(
                 decimal=Decimal("-3.14"),
                 positive_decimal=Decimal("3.14"),
@@ -897,10 +900,10 @@ class TestDatadotenv(TestCase):
 
         # Test validate argument
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 'DECIMAL=-3.14',
                 'POSITIVE_DECIMAL=-3.14',
-            ]))
+            ])
 
         # Test does not allow duplicates in convert
         with self.assertRaises(ValueError):
@@ -933,10 +936,10 @@ class TestDatadotenv(TestCase):
             )
 
         self.assertEqual(
-            spec.from_str("\n".join([
+            spec.from_([
                 'DECIMAL=-3.14',
                 'POSITIVE_DECIMAL=3.14',
-            ])),
+            ]),
             MyDotenv(
                 decimal=Decimal("-3.14"),
                 positive_decimal=Decimal("3.14"),
@@ -945,10 +948,10 @@ class TestDatadotenv(TestCase):
 
         # Test validate argument
         with self.assertRaises(datadotenv.error.InvalidValue):
-            spec.from_str("\n".join([
+            spec.from_([
                 'DECIMAL=-3.14',
                 'POSITIVE_DECIMAL=-3.14',
-            ]))
+            ])
 
         # Test does not allow duplicates in convert
         with self.assertRaises(ValueError):
@@ -960,6 +963,220 @@ class TestDatadotenv(TestCase):
                   validate=lambda x: x >= 0,
                 )\
                 .convert("positive_decimal", lambda s: s)
+
+    def test_can_read_from_files(self):
+
+        # Test file path
+
+        @dataclass
+        class MyDotenv:
+            var: int
+
+        with _create_test_fs_entry(".env", [
+            'VAR=1',
+        ]) as file_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(file_path),
+                MyDotenv(var=1),
+            )
+
+        # Test file path string
+
+        @dataclass
+        class MyDotenv:
+            var: int
+        
+        with _create_test_fs_entry(".env", [
+            'VAR=1',
+        ]) as file_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(str(file_path)),
+                MyDotenv(var=1),
+            )
+
+        # Test directory path
+
+        @dataclass
+        class MyDotenv:
+            var: int
+            secret_token: str
+
+        with _create_test_fs_entry("dir/", [
+            (".env", [
+                'VAR=1',
+            ]),
+            (".env.secret", [
+                'SECRET_TOKEN=password1234',
+            ]),
+        ]) as dir_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(dir_path),
+                MyDotenv(
+                    var=1,
+                    secret_token="password1234",
+                ),
+            )
+
+        # Test directory path string
+
+        @dataclass
+        class MyDotenv:
+            var: int
+            secret_token: str
+
+        with _create_test_fs_entry("dir/", [
+            (".env", [
+                'VAR=1',
+            ]),
+            (".env.secret", [
+                'SECRET_TOKEN=password1234',
+            ]),
+        ]) as dir_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(str(dir_path)),
+                MyDotenv(
+                    var=1,
+                    secret_token="password1234",
+                ),
+            )
+
+        # Test .env.secret overrides .env
+
+        @dataclass
+        class MyDotenv:
+            var: int
+            secret_token: str
+
+        with _create_test_fs_entry("dir/", [
+            (".env", [
+                'VAR=1',
+                'SECRET_TOKEN="Placeholder! Please replace with something secure."'
+            ]),
+            (".env.secret", [
+                'SECRET_TOKEN=password1234',
+            ]),
+        ]) as dir_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(dir_path),
+                MyDotenv(
+                    var=1,
+                    secret_token="password1234",
+                ),
+            )
+
+        # Test multiple manually specified files
+
+        @dataclass
+        class MyDotenv:
+            server_host: str
+            server_port: int
+            secret_token: str
+
+        with _create_test_fs_entry("dir/", [
+            (".env", [
+                'SERVER_HOST=http://127.0.0.1',
+                'SERVER_PORT=8080',
+                'SECRET_TOKEN="Placeholder! Please replace with something secure."'
+            ]),
+            (".env.prod", [
+                'SERVER_HOST=https://xkcd.com',
+                'SERVER_PORT=80',
+            ]),
+            (".env.secret", [
+                'SECRET_TOKEN=password1234',
+            ]),
+        ]) as dir_path:
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(
+                    dir_path / ".env",
+                    dir_path / ".env.secret",
+                    str(dir_path / ".env.prod"),
+                ),
+                MyDotenv(
+                    server_host="https://xkcd.com",
+                    server_port=80,
+                    secret_token="password1234",
+                ),
+            )
+
+        # Test can find files relative to git root
+
+        @dataclass
+        class MyDotenv:
+            var: int
+
+        with _create_test_fs_entry(".env", [
+            'VAR=1',
+        ]) as file_path:
+            dir_path = file_path.parent
+            self.assertEqual(
+                datadotenv(MyDotenv).from_(
+                    f"<git-root>/{dir_path.name}/.env"
+                ),
+                MyDotenv(var=1),
+            )
+
+        @dataclass
+        class MyDotenv:
+            var: int
+
+        project_path = Path(__file__).parent
+        with _create_test_fs_entry(
+                ".env.testy_mc_test", 
+                ['VAR=1'], 
+                parent_path=project_path,
+                remove_dir=False,
+        ) as file_path:
+            dir_path = file_path.parent
+            self.assertEqual(
+                datadotenv(MyDotenv).from_("<gitroot>"),
+                MyDotenv(var=1),
+            )
+            (project_path / ".env.testy_mc_test").unlink()
+
+    def test_can_read_from_os_environ(self):
+        
+        @dataclass
+        class MyDotenv:
+            datadotenv_test_env_var: int
+
+        os.environ["DATADOTENV_TEST_ENV_VAR"] = "1"
+
+        self.assertEqual(
+            datadotenv(MyDotenv, allow_incomplete=True).from_(
+                os.environ,
+            ),
+            MyDotenv(datadotenv_test_env_var=1),
+        )
+
+        del os.environ["DATADOTENV_TEST_ENV_VAR"]
+
+        # Test os.environ can override .env
+
+        @dataclass
+        class MyDotenv:
+            from_dotenv_file: int
+            datadotenv_test_env_var: int
+
+        with _create_test_fs_entry(".env", [
+            'FROM_DOTENV_FILE=1',
+            'DATADOTENV_TEST_ENV_VAR=1',
+        ]) as file_path:
+
+            os.environ["DATADOTENV_TEST_ENV_VAR"] = "2"
+
+            self.assertEqual(
+                datadotenv(MyDotenv, allow_incomplete=True).from_(
+                    file_path,
+                    os.environ,
+                ),
+                MyDotenv(
+                    from_dotenv_file=1,
+                    datadotenv_test_env_var=2,
+                ),
+            )   
+
+            del os.environ["DATADOTENV_TEST_ENV_VAR"]
 
 
 class TestParseDotenvFromCharsIter(TestCase):
@@ -1221,7 +1438,81 @@ class TestParseTimedelta(TestCase):
             with self.assertRaises(datadotenv.error.CannotParse):
                 parse.timedelta(s)
 
-            
+
+FsEntryContentSpec: TypeAlias = list[
+    str
+    | tuple[
+        str,
+        list[
+            tuple[
+                str, 
+                list[str]
+            ] | tuple[
+                str, 
+                list[
+                    tuple[
+                        str,
+                        list[str],
+                    ] | tuple[
+                        str,
+                        list[tuple[str, list[str]]]
+                    ]
+                ]
+            ]
+        ]
+    ]
+]
+
+
+@contextmanager
+def _create_test_fs_entry(
+        name: str,
+        content: FsEntryContentSpec,
+        remove_dir: bool = True,
+        parent_path: Path | None = None,
+) -> Generator[Path, None, None]:
+    parent_dir_is_root = False
+    if parent_path is None:
+        parent_path = \
+            Path(__file__).resolve().parent / f"test_dir{_generate_unique_id()}"
+        if parent_path.exists():
+            shutil.rmtree(parent_path)
+        parent_path.mkdir()
+        parent_dir_is_root = True
+
+    is_file_spec = not (len(content) > 0 and type(content[0]) is not str)
+    if is_file_spec:
+        file_path: Path = parent_path / name
+        if not file_path.parent.exists():
+            file_path.parent.mkdir(parents=True)
+        file_content = "\n".join(cast(tuple[str], content))
+        with open(file_path, "w") as f:
+            f.write(file_content)
+
+        yield file_path
+    else:
+        dir_path: Path = parent_path / name
+        dir_path.mkdir(parents=True)
+        for child_name, child_content in content:
+            with _create_test_fs_entry(
+                child_name,
+                cast(FsEntryContentSpec, child_content), 
+                parent_path=dir_path,
+            ): pass
+
+        yield dir_path
+
+    if parent_dir_is_root and remove_dir:
+        shutil.rmtree(parent_path)
+
+
+__unique_id: int = -1
+def _generate_unique_id() -> int:
+    global __unique_id
+    __unique_id += 1
+    return __unique_id
+
 
 if __name__ == "__main__":
     unittest.main()
+
